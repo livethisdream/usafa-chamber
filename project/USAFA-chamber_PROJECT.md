@@ -25,14 +25,22 @@ and plotting.
       typography tokens, and the conventions for live instrument state
       (connection status, run progress, abort/stop affordances).
 
-      Access: no repo with "phase" in its name appears under `livethisdream`,
-      `USAFA-ECE`, or `AF-ROBOTICS`, so it is likely a private repo under a
-      work organization. A private repo under a personal account attaches
-      normally; one under a work org additionally requires the Claude GitHub
-      App to be installed on that org, which an admin grants at
-      https://claude.ai/admin-settings/claude-in-slack. If access can't be
-      granted, the fallback is to lift the design language by hand — export
-      the token/theme files and a few representative screens.
+      Access: candidate URL is https://github.com/livethisdream/phaser, but
+      attaching it fails with "you don't have access", and it does not appear
+      in a repo listing. Other private repos under `livethisdream` *are*
+      visible to the session, so this is not a general private-repo problem —
+      it is specific to `phaser`. Likely causes, in order:
+
+      1. The Claude GitHub App is installed with "only select repositories"
+         and `phaser` is not among them. Fix in GitHub → Settings →
+         Applications → Claude → Configure.
+      2. The repo actually lives under a work organization rather than the
+         personal account, in which case an org admin grants access at
+         https://claude.ai/admin-settings/claude-in-slack.
+      3. The owner or name is off, or the repo was renamed.
+
+      Fallback if access can't be granted: lift the design language by hand —
+      export the token/theme files and a few representative screens.
 
 ## Acquisition script status
 
