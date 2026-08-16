@@ -25,7 +25,13 @@ and plotting.
 
 - [ ] **Verify EMCenter mnemonics against manual 399342** — the one part of the
       stack never exercised against real hardware. All of it routes through
-      `PositionerCmds` in `acquisition/config.py`.
+      `PositionerCmds` in `acquisition/config.py`. Run `python3
+      tools/bringup.py` (read-only by default) and paste the report; it checks
+      the prefix, the termination, and the `*OPC?` motion semantics directly.
+
+      Note the positioner's default resource string carries port **5025**,
+      which was copied from the VNA convention as a placeholder. The EMCenter's
+      real port is unconfirmed — `--probe-ports` will find it.
 
 - [ ] **Confirm whether the chamber has a rotary joint** — decides whether the
       scan range must stay within ±180°.

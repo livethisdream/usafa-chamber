@@ -61,14 +61,44 @@ matter, and `service/README.md` for the wire protocol.
 
 ## Before the first live run
 
-The EMCenter mnemonics in `acquisition/config.py` (`PositionerCmds`) are the one
-thing not yet verified against hardware. Cross-check them against ETS-Lindgren
-manual 399342 for your firmware — particularly the slot/device prefix format and
-whether `*OPC?` returns 0/1 for motion state on your card. Everything
-positioner-side routes through that one dataclass.
+The dry-run suites prove the state machine. They cannot prove the *protocol*
+assumptions, because the mocks encode the same assumptions the code does. So
+the first contact with hardware goes through the bring-up script, which talks to
+one instrument at a time in increasing order of consequence:
 
-Also: the S2VNA socket server is off by default, and the application must be
-running for the instrument to answer on port 5025 at all.
+```bash
+python3 tools/bringup.py --vna TCPIP0::127.0.0.1::5025::SOCKET \
+                         --pos TCPIP0::192.168.1.50::5025::SOCKET \
+                         --slot 5 --device A --sweep
+```
+
+Stages 0–3 are read-only — they query and never command motion. Stages 4 (a 5°
+jog) and 5 (a four-point scan) require `--allow-motion`. Run stage 4 with
+EMControl's simulation mode on the first time; it exercises the query semantics
+with nothing physically turning.
+
+If the positioner does not answer, `--probe` tries the other plausible prefix
+and termination combinations and reports which one worked; `--probe-ports`
+TCP-connects to a few plausible ports to find which is listening. `--report
+FILE` saves the transcript.
+
+What is most likely to need adjusting, all of it in `acquisition/config.py`:
+
+- **The positioner's TCP port.** The default resource string carries `5025`,
+  which is the *VNA's* convention used as a placeholder. Confirm the EMCenter's
+  actual port before trusting it.
+- The `5A:` slot/device prefix format, and the `SK`/`CP?`/`ST`/`SP` mnemonics.
+- Whether `*OPC?` returns 0 while moving on your card — the settle logic rests
+  on it, and stage 3 checks it directly.
+- Termination; CR out and LF in is assumed.
+
+Cross-check against ETS-Lindgren manual 399342 for your firmware. Everything
+positioner-side routes through `PositionerCmds` and `PositionerConfig`, so a
+mismatch is a one-file edit.
+
+Also: you need a VISA backend (`pip install pyvisa-py`, or vendor VISA), and the
+S2VNA socket server is off by default — the application must be running with it
+enabled for the instrument to answer at all.
 
 ## Design language
 
