@@ -36,24 +36,40 @@ and plotting.
 
 ## Acquisition script status
 
-`pattern_measure.py` (draft, not yet in the repo) is reviewed but unfixed.
-Confirmed against mock instruments; fixes pending:
+`acquisition/pattern_measure.py` — reviewed, fixed, and covered by a scenario
+suite (`acquisition/dryrun.py`, 9/9 passing against mock instruments). All six
+review findings are closed:
 
-- [ ] Angle grid overshoots the requested stop angle when the span isn't an
-      integer multiple of the step (`--step 30` measured 360°).
-- [ ] A mid-scan exception leaves the turntable commanded and moving — only
-      `KeyboardInterrupt` issues a stop.
-- [ ] A position mismatch warns but still records the sweep at the commanded
-      angle, silently misregistering the pattern.
-- [ ] A short/truncated VNA response crashes on array assignment.
-- [ ] The polar plot closes the trace unconditionally, fabricating data across
-      the unmeasured span on partial cuts.
-- [ ] `seek()` can return before motion starts (blind 0.2 s sleep, then trusts
-      `*OPC?`).
+- [x] Angle grid overshot the requested stop when the span wasn't an integer
+      multiple of the step (`--step 30` measured 360°). Now floors, drops a
+      duplicate full-circle endpoint, and reports the shortfall.
+- [x] A mid-scan exception left the turntable moving — only `KeyboardInterrupt`
+      issued a stop. `STOP` now runs on every exit path, before the socket
+      closes.
+- [x] A position mismatch only warned, then recorded the sweep at the commanded
+      angle. Now retries, then fails loudly; the plot uses readback angles.
+- [x] A truncated VNA response crashed on array assignment. Now length-checked
+      and re-read once.
+- [x] The polar plot closed the trace unconditionally, fabricating data across
+      the unmeasured span of a partial cut. Now closes only on a full
+      revolution, and the radial axis fits the data instead of clipping at
+      −40 dB.
+- [x] `seek()` could return before motion started. Completion now requires
+      motion-complete *and* an in-tolerance readback on consecutive polls.
 
-Verify against hardware before the first live run: serial port parameters are
-never set in code, instrument state is inherited rather than preset, and
-nothing checks that a calibration is applied.
+Also addressed: serial line parameters are set for ASRL resources; sweep type,
+averaging, and smoothing are written explicitly rather than inherited (without
+`SYST:PRES`, which would clear the calibration); correction state is queried and
+reported; a warm-up sweep runs before the frequency vector is trusted; transient
+VISA failures are retried at the query layer; run metadata is written to
+`run_meta.json`.
+
+Added on top of the fixes: end-of-run closure check (re-measures the start
+angle to quantify drift, on by default), optional backlash takeup, and optional
+aux-parameter capture (`--aux-param S11`).
+
+Still unverified against hardware — the EMCenter mnemonics in `PositionerCmds`,
+per ETS-Lindgren manual 399342.
 
 ## Open questions
 
