@@ -25,6 +25,15 @@ and plotting.
       typography tokens, and the conventions for live instrument state
       (connection status, run progress, abort/stop affordances).
 
+      Access: no repo with "phase" in its name appears under `livethisdream`,
+      `USAFA-ECE`, or `AF-ROBOTICS`, so it is likely a private repo under a
+      work organization. A private repo under a personal account attaches
+      normally; one under a work org additionally requires the Claude GitHub
+      App to be installed on that org, which an admin grants at
+      https://claude.ai/admin-settings/claude-in-slack. If access can't be
+      granted, the fallback is to lift the design language by hand — export
+      the token/theme files and a few representative screens.
+
 ## Acquisition script status
 
 `pattern_measure.py` (draft, not yet in the repo) is reviewed but unfixed.
