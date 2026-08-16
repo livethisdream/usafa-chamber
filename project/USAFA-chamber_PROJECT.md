@@ -16,31 +16,12 @@ and plotting.
 
 ## TODO
 
-- [ ] **Provide the phase GUI repo** — the UI language for this project should
-      follow the phase GUI already in progress, rather than inventing a new
-      one. That repo is not yet attached to this session, so the front end is
-      blocked on it. Needed: the repo (owner/name) so it can be added as a
-      source, and a pointer to whichever parts carry the design language worth
-      reusing — layout and navigation structure, component set, color and
-      typography tokens, and the conventions for live instrument state
-      (connection status, run progress, abort/stop affordances).
+- [x] **Provide the phase GUI repo** — resolved: `livethisdream/phaser`
+      (ADI CN0566 Phaser beamformer). Access granted and the repo is attached
+      to the session. Design language summarized below.
 
-      Access: candidate URL is https://github.com/livethisdream/phaser, but
-      attaching it fails with "you don't have access", and it does not appear
-      in a repo listing. Other private repos under `livethisdream` *are*
-      visible to the session, so this is not a general private-repo problem —
-      it is specific to `phaser`. Likely causes, in order:
-
-      1. The Claude GitHub App is installed with "only select repositories"
-         and `phaser` is not among them. Fix in GitHub → Settings →
-         Applications → Claude → Configure.
-      2. The repo actually lives under a work organization rather than the
-         personal account, in which case an org admin grants access at
-         https://claude.ai/admin-settings/claude-in-slack.
-      3. The owner or name is off, or the repo was renamed.
-
-      Fallback if access can't be granted: lift the design language by hand —
-      export the token/theme files and a few representative screens.
+- [ ] **Decide how much of Phaser to reuse** — the look alone, or the
+      look plus its backend/transport architecture. See "Reuse decision".
 
 ## Acquisition script status
 
@@ -78,6 +59,57 @@ aux-parameter capture (`--aux-param S11`).
 
 Still unverified against hardware — the EMCenter mnemonics in `PositionerCmds`,
 per ETS-Lindgren manual 399342.
+
+## UI language — from `livethisdream/phaser`
+
+Source of truth: `frontend/src/style.css` (~1400 lines) and `frontend/index.html`.
+Vanilla JS on Vite 8, no framework; Plotly for charts.
+
+**Tokens** — declared on `:root`, overridden wholesale by `html[data-theme="light"]`,
+so both themes use the same names:
+
+- Surfaces: `--bg-dark #0f111a`, `--bg-surface rgba(30,33,44,.6)` with
+  `backdrop-filter: blur(12px)`, hairline `--glass-border rgba(255,255,255,.08)`
+- Accent: `--primary #0067b9` (ADI blue), `--secondary #0088d1`,
+  `--success #10b981`, `--error #ef4444`, amber `#f59e0b` for transitional states
+- Text: `--text-main #f8fafc`, `--text-muted #94a3b8`
+- Geometry: `--radius 16px`, `--transition all .3s cubic-bezier(.4,0,.2,1)`
+- Type: Inter for body, Outfit for headings; wordmark is a gradient clipped to text
+- Body carries a fixed two-corner radial-gradient wash in the accent color
+
+**Layout** — icon rail (`.sidebar-icon-btn`) → collapsible accordion settings
+panel (`.controls-panel.glass-panel`) → main plot area, plus a logs pane, modals,
+and a status bar. `.glass-panel` is the universal container.
+
+**Live-state conventions** — directly relevant to instrument control:
+
+- `.dot.connected` / `.dot.disconnected` — 10px dot with a colored glow
+- `.backend-status-pill.state-starting|ready|error` — amber/green/red, each as
+  10% background over a 40% border of the same hue
+- `.cal-status-indicator`, `.cal-spinner`, `.calibration-feedback` — the
+  long-running-operation pattern, already close to what a scan needs
+- `.log-console` / `.log-line` — streaming log
+
+**Architecture** — `frontend/src/transport.js` is a facade over four backends
+(web REST+WebSocket, PyWebView IPC, Tauri, Electron) chosen at runtime.
+`phaser_headless.py` runs ZMQ pub/rep (5555/5556) plus WebSocket (8765) and
+HTTP (8080), deployed as a systemd unit. Its `do_sweep()` long-running loop
+broadcasting progress is structurally the same problem as a pattern scan.
+
+Note: `transport-{web,ipc,tauri,electron}.js` are gitignored by explicit path
+in the root `.gitignore`, so the committed `frontend/` cannot build as-is —
+only `frontend-radar/` has its transport committed. Fine for reading the design
+language; a blocker if we ever want to run it.
+
+## Reuse decision
+
+Two levels, not yet chosen:
+
+1. **Look only** — new chamber frontend, same tokens and component classes.
+   Cheap, no coupling.
+2. **Look plus architecture** — also mirror the headless-service +
+   transport-facade split, wrapping `pattern_measure.py` as the backend so a
+   scan streams progress to the UI the way `do_sweep()` does.
 
 ## Open questions
 
