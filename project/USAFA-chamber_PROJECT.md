@@ -20,8 +20,15 @@ and plotting.
       (ADI CN0566 Phaser beamformer). Access granted and the repo is attached
       to the session. Design language summarized below.
 
-- [ ] **Decide how much of Phaser to reuse** — the look alone, or the
-      look plus its backend/transport architecture. See "Reuse decision".
+- [x] **Decide how much of Phaser to reuse** — resolved: look *plus*
+      architecture. Built; see "Status".
+
+- [ ] **Verify EMCenter mnemonics against manual 399342** — the one part of the
+      stack never exercised against real hardware. All of it routes through
+      `PositionerCmds` in `acquisition/config.py`.
+
+- [ ] **Confirm whether the chamber has a rotary joint** — decides whether the
+      scan range must stay within ±180°.
 
 ## Acquisition script status
 
@@ -101,19 +108,41 @@ in the root `.gitignore`, so the committed `frontend/` cannot build as-is —
 only `frontend-radar/` has its transport committed. Fine for reading the design
 language; a blocker if we ever want to run it.
 
-## Reuse decision
+## Status
 
-Two levels, not yet chosen:
+Three layers, each usable without the ones above it:
 
-1. **Look only** — new chamber frontend, same tokens and component classes.
-   Cheap, no coupling.
-2. **Look plus architecture** — also mirror the headless-service +
-   transport-facade split, wrapping `pattern_measure.py` as the backend so a
-   scan streams progress to the UI the way `do_sweep()` does.
+```
+acquisition/   the measurement.  CLI-complete on its own.
+service/       WebSocket control plane wrapping the engine.  No UI needed.
+frontend/      browser UI.  Talks only to the service, via a transport facade.
+```
+
+The seam is `ScanEngine.emit`: the engine reports through a callback and knows
+nothing about who is listening. The CLI renders those events as stdout lines,
+the service forwards the same events as JSON frames. The two front ends cannot
+drift because there is only one scan implementation.
+
+Verified against mocks, no hardware involved:
+
+| Suite | Covers | Result |
+| --- | --- | --- |
+| `python3 -m acquisition.dryrun` | the six review defects plus fault injection | 9/9 |
+| `python3 -m service.smoke` | wire protocol, abort, malformed input | 3/3 |
+| `python3 tools/uicheck.py` | real browser, real socket, both themes | 6/6 |
+
+Two defects were found by these suites during construction and fixed: a
+`numpy.bool_` reaching `json.dumps` killed the broadcast task and dropped every
+client at once (encoder now coerces), and the service replayed a *finished*
+run's points to newly connected clients (replay now gated on `state ==
+scanning`).
 
 ## Open questions
 
 - Cable wrap: is there a rotary joint, or does the scan range need to stay
-  within ±180°?
+  within ±180°? The UI defaults to −180→175 on the assumption there is not.
 - Which S-parameters to capture per angle — S21 only, or S21 + S11 to catch a
-  connection change mid-scan?
+  connection change mid-scan? Both are supported (`--aux-param`); S21 alone is
+  the default.
+- Does the chamber PC get the service as a systemd unit
+  (`service/chamber.service`), or is it launched per session?

@@ -1,6 +1,7 @@
 numpy>=1.24
 pyvisa>=1.13
 matplotlib>=3.7
+websockets>=12.0
 # A VISA backend is also required for real hardware. Either a vendor VISA
 # (NI/Keysight) or the pure-python fallback:
 #   pip install pyvisa-py

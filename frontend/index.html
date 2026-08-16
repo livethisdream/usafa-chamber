@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+  <title>Chamber Control</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@400;500;600&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div class="app-container">
+
+    <header class="glass-panel glass-header">
+      <div class="header-left">
+        <span class="app-wordmark">CHAMBER</span>
+        <span class="subtitle" id="subtitle">antenna pattern acquisition</span>
+      </div>
+      <div class="header-actions">
+        <span class="status-pill mock" id="pill-mock" hidden>MOCK</span>
+        <span class="status-pill" id="pill-state">
+          <span class="dot disconnected" id="dot-link"></span>
+          <span id="state-text">offline</span>
+        </span>
+        <button class="btn btn-small" id="btn-theme" title="Switch theme">◐</button>
+      </div>
+    </header>
+
+    <main class="dashboard">
+
+      <aside class="controls-panel glass-panel">
+        <div>
+          <div class="panel-title">Sweep</div>
+          <div class="field-row">
+            <div class="control-group">
+              <label for="start-ghz">Start (GHz)</label>
+              <input class="modern-input" type="number" id="start-ghz" value="2.0" step="0.01" />
+            </div>
+            <div class="control-group">
+              <label for="stop-ghz">Stop (GHz)</label>
+              <input class="modern-input" type="number" id="stop-ghz" value="3.0" step="0.01" />
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="control-group">
+              <label for="points">Points</label>
+              <input class="modern-input" type="number" id="points" value="101" min="2" />
+            </div>
+            <div class="control-group">
+              <label for="ifbw">IF BW (Hz)</label>
+              <input class="modern-input" type="number" id="ifbw" value="1000" min="1" />
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="control-group">
+              <label for="power">Power (dBm)</label>
+              <input class="modern-input" type="number" id="power" value="0" step="0.5" />
+            </div>
+            <div class="control-group">
+              <label for="param">Parameter</label>
+              <select class="modern-select" id="param">
+                <option>S21</option>
+                <option>S12</option>
+                <option>S11</option>
+                <option>S22</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div>
+          <div class="panel-title">Scan</div>
+          <div class="field-row">
+            <div class="control-group">
+              <label for="from-deg">From (deg)</label>
+              <input class="modern-input" type="number" id="from-deg" value="-180" step="1" />
+            </div>
+            <div class="control-group">
+              <label for="to-deg">To (deg)</label>
+              <input class="modern-input" type="number" id="to-deg" value="175" step="1" />
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="control-group">
+              <label for="step-deg">Step (deg)</label>
+              <input class="modern-input" type="number" id="step-deg" value="5" step="0.1" min="0.1" />
+            </div>
+            <div class="control-group">
+              <label for="cut-ghz">Cut freq (GHz)</label>
+              <input class="modern-input" type="number" id="cut-ghz" placeholder="center" step="0.01" />
+            </div>
+          </div>
+          <div class="control-group">
+            <label>
+              <input type="checkbox" id="closure" checked /> Closure check (re-measure start angle)
+            </label>
+            <label>
+              <input type="checkbox" id="return-home" checked /> Return home when finished
+            </label>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div>
+          <div class="panel-title">Instruments</div>
+          <div class="control-group">
+            <label for="vna-res">VNA resource</label>
+            <input class="modern-input" type="text" id="vna-res" value="TCPIP0::127.0.0.1::5025::SOCKET" />
+          </div>
+          <div class="control-group">
+            <label for="pos-res">Positioner resource</label>
+            <input class="modern-input" type="text" id="pos-res" value="TCPIP0::192.168.1.50::5025::SOCKET" />
+          </div>
+          <div class="field-row">
+            <div class="control-group">
+              <label for="slot">Slot</label>
+              <input class="modern-input" type="number" id="slot" value="5" min="1" />
+            </div>
+            <div class="control-group">
+              <label for="device">Device</label>
+              <select class="modern-select" id="device"><option>A</option><option>B</option></select>
+            </div>
+          </div>
+        </div>
+
+        <div class="action-row">
+          <button class="btn btn-primary" id="btn-start">Start scan</button>
+          <button class="btn btn-danger" id="btn-abort" disabled>Abort</button>
+        </div>
+      </aside>
+
+      <div class="plots-stack">
+        <section class="glass-panel graph-panel">
+          <div class="panel-header-row">
+            <div style="display:flex; align-items:center; gap:0.5rem;">
+              <h3 style="font-size:0.86rem; font-weight:600;">Pattern</h3>
+              <span class="status-pill" id="pill-phase">idle</span>
+            </div>
+            <div class="chart-stats">
+              <div class="stat-box"><div class="stat-label">Angle</div><div class="stat-value" id="stat-angle">—</div></div>
+              <div class="stat-box"><div class="stat-label">Cut</div><div class="stat-value" id="stat-cut">—</div></div>
+              <div class="stat-box"><div class="stat-label">Peak</div><div class="stat-value" id="stat-peak">—</div></div>
+              <div class="stat-box"><div class="stat-label">Progress</div><div class="stat-value" id="stat-progress">0/0</div></div>
+            </div>
+          </div>
+          <div class="progress-track"><div class="progress-fill" id="progress"></div></div>
+          <div class="chart-wrapper" style="margin-top:0.5rem;">
+            <canvas id="polar"></canvas>
+          </div>
+        </section>
+
+        <section class="glass-panel graph-panel" style="flex:0 0 190px;">
+          <div class="panel-header-row">
+            <h3 style="font-size:0.86rem; font-weight:600;">Spectrum at current angle</h3>
+            <span class="status-pill" id="pill-span">—</span>
+          </div>
+          <div class="chart-wrapper"><canvas id="spectrum"></canvas></div>
+        </section>
+      </div>
+    </main>
+
+    <section class="glass-panel logs-pane">
+      <div class="logs-toolbar">
+        <div class="panel-title" style="margin:0;">Log</div>
+        <button class="btn btn-small" id="btn-clear-log">Clear</button>
+      </div>
+      <div class="log-console" id="log"></div>
+    </section>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

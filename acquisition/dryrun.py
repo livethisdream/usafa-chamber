@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Scenario runner for pattern_measure.py against mock instruments.
+"""Scenario runner for the acquisition stack, against mock instruments.
 
 Each scenario pins one of the failure modes found in review, so a regression
 shows up here instead of on the chamber floor.
 
-    python3 dryrun.py            # run every scenario, print PASS/FAIL
-    python3 dryrun.py nominal    # run one scenario in-process (verbose)
+    python3 -m acquisition.dryrun            # all scenarios, PASS/FAIL
+    python3 -m acquisition.dryrun nominal    # one scenario, verbose
 
-Scenarios run as subprocesses so each gets a clean import of pattern_measure.
+Scenarios run as subprocesses so each gets a clean import.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 COMMON = ["--vna", "TCPIP0::127.0.0.1::5025::SOCKET",
           "--pos", "TCPIP0::192.168.1.50::5025::SOCKET",
           "--points", "21"]
@@ -38,7 +38,7 @@ def _read_angles(outdir: Path) -> list[float]:
 
 # ---------------------------------------------------------------- scenarios
 
-def s_nominal(outdir):
+def s_nominal(_):
     return dict(faults={}, argv=COMMON + ["--step", "30", "--to-deg", "355"])
 
 
@@ -50,11 +50,11 @@ def check_nominal(r, outdir):
     meta = json.loads((outdir / "run_meta.json").read_text())
     assert meta["closure"] is not None, "closure check missing"
     assert (outdir / "pattern.png").exists(), "no plot"
-    return f"{len(angles)} angles, last {max(angles):g}, closure " \
-           f"{meta['closure']['max_abs_delta_db']:.3f} dB"
+    return (f"{len(angles)} angles, last {max(angles):g}, closure "
+            f"{meta['closure']['max_abs_delta_db']:.3f} dB")
 
 
-def s_partial(outdir):
+def s_partial(_):
     return dict(faults={}, argv=COMMON + ["--step", "15", "--from-deg=-90",
                                           "--to-deg", "90"])
 
@@ -67,7 +67,7 @@ def check_partial(r, outdir):
     return f"{len(angles)} angles, -90..90, trace left open"
 
 
-def s_indivisible(outdir):
+def s_indivisible(_):
     return dict(faults={}, argv=COMMON + ["--step", "7", "--to-deg", "90"])
 
 
@@ -78,7 +78,7 @@ def check_indivisible(r, outdir):
     return "step 7 over 0..90 stops at 84, does not overshoot to 91"
 
 
-def s_early_opc(outdir):
+def s_early_opc(_):
     return dict(faults={"early_opc": True},
                 argv=COMMON + ["--step", "45", "--move-timeout", "5"])
 
@@ -92,7 +92,7 @@ def check_early_opc(r, outdir):
     return f"controller lied about motion-complete; worst error {worst:.2f} deg"
 
 
-def s_lagging(outdir):
+def s_lagging(_):
     return dict(faults={"early_opc": True, "lag_deg": 3.0},
                 argv=COMMON + ["--step", "45", "--move-timeout", "2"])
 
@@ -103,7 +103,7 @@ def check_lagging(r, outdir):
     return f"failed loudly ({r['exc'] or 'rc=' + str(r['rc'])}), STOP issued"
 
 
-def s_short_sweep(outdir):
+def s_short_sweep(_):
     return dict(faults={"short_sweep": 3},
                 argv=COMMON + ["--step", "45", "--move-timeout", "5"])
 
@@ -113,7 +113,7 @@ def check_short_sweep(r, outdir):
     return "truncated sweep re-read, scan completed"
 
 
-def s_drop_sweep(outdir):
+def s_drop_sweep(_):
     return dict(faults={"drop_sweep": 3},
                 argv=COMMON + ["--step", "45", "--move-timeout", "5"])
 
@@ -124,7 +124,7 @@ def check_drop_sweep(r, outdir):
     return f"{r['exc']} surfaced, STOP issued at {r['stops']}"
 
 
-def s_poll_drops(outdir):
+def s_poll_drops(_):
     return dict(faults={"drop_polls": 3},
                 argv=COMMON + ["--step", "45", "--move-timeout", "5"])
 
@@ -134,7 +134,7 @@ def check_poll_drops(r, outdir):
     return "3 dropped polls absorbed, scan completed"
 
 
-def s_backlash(outdir):
+def s_backlash(_):
     return dict(faults={}, argv=COMMON + ["--step", "45", "--backlash", "2",
                                           "--move-timeout", "5"])
 
@@ -160,13 +160,12 @@ SCENARIOS = {
 # ------------------------------------------------------------------ runners
 
 def run_one(name: str, outdir: Path) -> dict:
-    """In-process: patch pyvisa, run main(), report what happened."""
-    sys.path.insert(0, str(HERE))
-    import mock_instruments
+    """In-process: patch pyvisa, run the CLI, report what happened."""
+    from . import mock_instruments
 
     spec = SCENARIOS[name][0](outdir)
     state = mock_instruments.install(mock_instruments.Faults(**spec["faults"]))
-    import pattern_measure
+    from . import pattern_measure
 
     argv = spec["argv"] + ["--outdir", str(outdir)]
     rc, exc = 0, None
@@ -191,12 +190,13 @@ def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="pattern_dryrun_"))
     for name, (_, check, blurb) in SCENARIOS.items():
         outdir = tmp / name
-        proc = subprocess.run([sys.executable, __file__, name, str(outdir)],
-                              capture_output=True, text=True, timeout=300)
+        proc = subprocess.run(
+            [sys.executable, "-m", "acquisition.dryrun", name, str(outdir)],
+            capture_output=True, text=True, timeout=300, cwd=ROOT)
         tag = [ln for ln in proc.stdout.splitlines() if ln.startswith("__RESULT__")]
         if not tag:
             print(f"FAIL  {name:<{width}}  runner crashed\n{proc.stdout[-500:]}"
-                  f"\n{proc.stderr[-500:]}")
+                  f"\n{proc.stderr[-800:]}")
             failures += 1
             continue
         r = json.loads(tag[0][len("__RESULT__"):])

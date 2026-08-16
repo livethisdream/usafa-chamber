@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 runs/
 pattern_run/
+node_modules/
+ui-shots/

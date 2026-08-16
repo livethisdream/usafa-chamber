@@ -1,0 +1,25 @@
+# Chamber acquisition service.
+# Adjust WorkingDirectory, User, and ports, then:
+#   sudo cp service/chamber.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now chamber
+
+[Unit]
+Description=USAFA chamber antenna pattern acquisition service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chamber
+WorkingDirectory=/opt/usafa-chamber
+ExecStart=/usr/bin/python3 -m service.server --ws-port 8765 --http-port 8080
+Restart=on-failure
+RestartSec=5
+# The instruments are physical; do not let a restart storm slew the table.
+StartLimitBurst=3
+StartLimitIntervalSec=120
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
