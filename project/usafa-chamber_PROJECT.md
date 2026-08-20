@@ -70,64 +70,83 @@ zero-filled), and a normalized polar `pattern.png` at the requested cut frequenc
   FTDI link corrupts bytes at a measurable rate. Outgoing corruption produces
   `ERROR 1` (loud); incoming corruption splits a reply so the fragment still
   parses as a plausible angle (silent, and therefore worse).
+- **2026-08-20** — Dashboard mirrors the Phaser architecture: WebSocket service
+  with a JSON `{cmd, id}` protocol, a transport facade on the frontend, and a
+  simulated backend preserving the payload contract. Reason: it is a proven
+  shape in this codebase, and the sim makes the UI developable off-site.
+- **2026-08-20** — The scan worker owns the backend and STOP sets a flag it
+  polls, rather than a second thread writing a stop command. Reason: the
+  instruments are single-threaded and stateful; a competing write would land in
+  the middle of another thread's request/response exchange. Serial access stays
+  single-threaded and stop still responds in ~100 ms via `seek(should_abort=)`.
 - **2026-08-20** — Repo hosted under OneDrive at `USAFA/usafa-chamber` (sibling to
   `USAFA/ece444`), mounted into cdocker, remote `livethisdream/usafa-chamber`.
 
 # Plan
 
-**Phase 1 (current): get a link to both instruments.** Neither is reachable from this
-laptop yet — see Status. Until the EMCenter enumerates a COM port and S2VNA is
-running, the acquisition path cannot be exercised against hardware.
+**Phase 1 (done): service, simulator, transport.** `chamber_service.py` plus the
+Vite frontend, verified against both backends. See `README.md` to run either.
 
 **Later:**
-- Dry-run the full scan against EMControl simulation mode.
-- Verify every mnemonic in `PositionerCmds` against manual 399342.
-- First real cut on a known reference antenna to sanity-check pattern shape.
-- Add sweep averaging (matters for depth in the nulls) and a `--speed` CLI flag.
+- Phase 2 — polish the hardware path in the UI: richer status, jog affordances,
+  surfacing link-retry warnings to the operator rather than only stderr.
+- Phase 3 — run browser: list/load stored runs, overlay cuts, export.
+- Teach the simulator to replay a recorded run (`thru_run/pattern.csv`) instead
+  of synthesizing, so the UI can be exercised against real measured data.
+- Sweep averaging; wire `ACC?`/acceleration into the config.
+- First real cut on a reference antenna once one is mounted.
 
 # Status
 
-**Full chain verified end to end on hardware, including a completed 72-point scan.**
+**Full acquisition chain verified on hardware, and dashboard phase 1 is complete.**
 
-Rig, read off the hardware 2026-08-20:
-- VNA — `CMT, A2202-Fx, 26018474, 26.3.1/1` over the S2VNA socket server on 5025
-- Chassis — `ETS Lindgren EMCenter version 4.6.0`
-- Slot 1A — `ETS-Lindgren, EMControl 7006-001, 2.10.3`; slots 3–8 empty, slot 2
-  holds some other card that rejects EMControl mnemonics
-- Motion confirmed visually: 90°→150°→90° at 40% speed, ~6.7 deg/s
+Rig — VNA `CMT, A2202-Fx, 26018474, 26.3.1/1`; chassis `EMCenter 4.6.0`; slot 1A
+`EMControl 7006-001, 2.10.3`. Motion confirmed visually more than once
+(90°→150°→90° at 40% speed, ~6.7 deg/s, exact arrivals, no latched errors).
 
-**Thru-line reference run (`thru_run/`), 72 angles × 101 freqs, 2–3 GHz:**
-- S21 flat to **0.019 dB peak-to-peak across the full rotation**; std dev
-  0.0029 dB; worst per-frequency angular spread 0.025 dB at 2.040 GHz
-- Polar plot is a clean circle — the correct answer for a thru, and a good
-  system-stability figure for the whole chain
-- Mean level −0.88 dB (cable loss)
+**Thru-line reference (`thru_run/`), 72 angles × 101 freqs, 2–3 GHz:** S21 flat to
+**0.019 dB peak-to-peak across the full rotation** (σ 0.0029 dB), mean −0.88 dB.
+The polar plot is a clean circle — the correct answer for a thru, and a strong
+stability figure for the whole chain. Anything above ~0.03 dB of angular
+structure in a real measurement is therefore signal, not instrumentation.
 
-**Link quality is the open concern.** That run logged 3 `ERROR 1` retries on
-outgoing `SK` commands and 2 corrupted position reads — roughly 7% of exchanges
-affected. The corrupted reads decoded as split replies (`'255.0 DEGREES'` →
-`'2'` + `'55.0 DEGREES'`), which is why position replies are now format-validated.
-All are handled in software now, but the physical cause is unaddressed: candidates
-are USB cable quality, a hub in the path, or RF pickup from the VNA in the chamber.
+**Dashboard phase 1 (`chamber_service.py` + `frontend/`).** Verified against the
+simulator: every command, unknown-command rejection, live push frames,
+concurrent-scan refusal, mid-scan jog refusal, STOP preempting a running scan,
+run persistence and reload, and polar trace closure on a full rotation versus
+staying open on a partial arc. `HardwareBackend` separately verified read-only
+against the real rig — identity, `configure()` from a `ScanRequest` (51 pts over
+exactly 2.4–2.6 GHz), `measure()`, and `get_state()` reporting `mode: hw`.
 
-Eleven bugs fixed total: five from code review, five that only hardware contact
-could expose, plus the unsupported `SENS:SWE:TIME?` — see Decisions.
+**Link quality remains the open hardware concern.** One 72-point run logged 3
+`ERROR 1` retries and 2 corrupted position reads, ~7% of exchanges; a later
+rotation test logged none. Both failure modes are handled in software now, but
+the physical cause is unaddressed — cable, hub, or RF pickup are the candidates.
+
+Twelve bugs fixed: five from code review, five that only hardware contact could
+expose, the unsupported `SENS:SWE:TIME?`, and the split-reply position bug.
+
+**Instrument state left behind:** the VNA is on 2–3 GHz / 101 pts / S21 from the
+reference scan, not the 100 kHz–22 GHz S11 sweep it held at session start.
 
 # ToDo
 
-- [ ] Chase the FTDI link corruption physically — try a different cable, remove
-      any hub from the path, check routing relative to the VNA and chamber feed.
-- [ ] Build the browser dashboard (see Plan) — WebSocket service plus Vite
-      frontend, mirroring the Phaser architecture and visual language.
-- [ ] Confirm turntable continuous / non-continuous mode on the front panel
-      before any run with a cable routed through the tower.
-- [ ] Switch Device Emulation back off — it changes nothing we depend on, but
-      it is an uncharacterized variable.
-- [ ] First real cut on a reference antenna to sanity-check pattern shape.
-- [ ] Add sweep averaging; consider wiring `ACC?`/acceleration into the config.
-- [x] ~~Install the ETS-Lindgren EMCenter USB/VCP driver~~ — done, COM16.
+- [ ] Chase the FTDI link corruption physically — different cable, no hub, check
+      routing relative to the VNA and chamber feed.
+- [ ] Phase 2: hardware-path polish in the UI; surface link-retry warnings to the
+      operator instead of only stderr.
+- [ ] Phase 3: run browser — list/load stored runs, overlay cuts, export.
+- [ ] Teach the simulator to replay `thru_run/pattern.csv` for real data shapes.
+- [ ] Confirm continuous / non-continuous mode on the front panel before any run
+      with a cable routed through the tower.
+- [ ] Switch Device Emulation back off — unused, and an uncharacterized variable.
+- [ ] Restore the VNA to its original sweep setup, or set it up fresh next visit.
+- [ ] First real cut on a reference antenna; add sweep averaging.
+- [x] ~~Install the EMCenter USB/VCP driver~~ — done, COM16.
 - [x] ~~Cross-check `PositionerCmds` mnemonics~~ — probed against the card.
-- [x] ~~Enable the S2VNA socket server~~ — done, listening on 5025.
-- [x] ~~Verify the VNA SCPI path~~ — configure/frequencies/measure all exercised.
+- [x] ~~Enable the S2VNA socket server~~ — listening on 5025.
+- [x] ~~Verify the VNA SCPI path~~ — configure/frequencies/measure exercised.
 - [x] ~~Validate `seek()` against real mechanics~~ — visually confirmed.
-- [x] ~~First full collection run~~ — 72-point thru reference in `thru_run/`.
+- [x] ~~First full collection run~~ — 72-point thru reference.
+- [x] ~~Dashboard phase 1~~ — service, sim backend, transport, frontend.
+- [x] ~~Verify `HardwareBackend` against the real rig~~ — read-only check passed.
