@@ -324,6 +324,9 @@ class Positioner:
             raise RuntimeError(f"positioner rejected {body!r}: {reply}")
         return reply
 
+    # A complete position reply always carries its units: '90.0 DEGREES'.
+    _POS_RE = re.compile(r"^[-+]?\d+(?:\.\d+)?\s*DEG", re.I)
+
     @staticmethod
     def _deg(reply: str) -> float:
         """Parse a numeric reply. The card answers with units, e.g. '90.0 DEGREES'."""
@@ -332,8 +335,30 @@ class Positioner:
             raise RuntimeError(f"unparseable reply: {reply!r}")
         return float(m.group())
 
-    def position(self) -> float:
-        return self._deg(self._q(self.cmds.query_pos))
+    def position(self, _retry: bool = True) -> float:
+        """Current angle in degrees, validated against the full reply format.
+
+        Byte-level corruption on the FTDI link can split a reply in two, and
+        the leading fragment still parses as a perfectly plausible angle:
+        observed mid-scan, '255.0 DEGREES' arrived as '2' + '55.0 DEGREES' and
+        '295.0 DEGREES' as '29' + '5.0 DEGREES', so the run recorded 2.0 and
+        29.0 degrees for those cuts. Nothing rejects a bare number, which makes
+        this worse than an outright ERROR - with a real antenna on the tower it
+        would silently mislabel the angle of a cut.
+
+        Requiring the units suffix turns the fragment into a detectable fault:
+        '2' fails, '2.0 DEGREES' passes. On failure, resynchronize (which also
+        discards the orphaned remainder) and re-read once.
+        """
+        reply = self._q(self.cmds.query_pos)
+        if not self._POS_RE.match(reply):
+            if _retry:
+                print(f"[pos] malformed position reply {reply!r}; "
+                      f"resyncing and re-reading once", file=sys.stderr)
+                self._flush_input()
+                return self.position(_retry=False)
+            raise RuntimeError(f"malformed position reply: {reply!r}")
+        return self._deg(reply)
 
     def in_motion(self) -> bool:
         # *OPC? on this card returns 0 while moving, 1 when motion is complete
