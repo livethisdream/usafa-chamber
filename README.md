@@ -103,9 +103,35 @@ enabled for the instrument to answer at all.
 ## Design language
 
 The UI follows [`livethisdream/phaser`](https://github.com/livethisdream/phaser)
-— same token names, same values, same `html[data-theme="light"]` override, so
-the two applications read as one family. The one deliberate divergence: plots
-are drawn on canvas (`frontend/src/plot.js`) rather than with Plotly, so the UI
-builds and runs on a lab machine with no package registry reachable. Both plot
-classes expose `resize()` / `setData()` / `draw()`, so swapping in a charting
-library later is a single-file change.
+— same token names, same values, same `html[data-theme="light"]` override, and
+the same chrome, so the two applications read as one family:
+
+- **An accordion of settings** on the left, over four sections: **VNA**,
+  **Turntable**, **Simulation**, **Output**. Collapsing the sidebar leaves the
+  icon rail behind, and clicking a rail icon expands straight back into that
+  section.
+- **Tabs over the plots** on the right: **Pattern Measurement**, **VNA**,
+  **Turntable**, **Logs**. Inactive panes are hidden with `visibility`, not
+  `display`, so a canvas keeps its size and comes back drawn rather than blank.
+- **Theme at the foot of the sidebar**, cycling system → light → dark. System
+  is the default and stays live: flipping the OS theme with the page open moves
+  the page with it, until someone picks a side.
+
+Two deliberate divergences. Plots are drawn on canvas (`frontend/src/plot.js`)
+rather than with Plotly, so the UI builds and runs on a lab machine with no
+package registry reachable — every plot class exposes `resize()` / `setData()`
+/ `draw()`, so swapping in a charting library later is a single-file change.
+And the Turntable tab has no counterpart in Phaser, which has no moving
+hardware to show: it draws the axis dial, the commanded and reported angles,
+and which points on the grid are already measured.
+
+### Comparing against a simulation
+
+The Simulation section imports a pattern and overlays it on the measured cut in
+amber, with an RMS deviation in the stat row. It reads this project's own
+`pattern.csv` and, failing that, any CSV carrying an angle column and a dB
+column — which covers most solver exports. Both traces are normalized to their
+own peak, so a model in dBi and a measurement in raw S21 dB are still
+comparable; `Rotate` takes out a known mount offset. Parsing happens in the
+browser (`frontend/src/reference.js`). Nothing is uploaded, and the service
+never learns a comparison is going on.
