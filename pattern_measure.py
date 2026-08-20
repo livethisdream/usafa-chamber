@@ -148,11 +148,26 @@ class Vna:
         self.io.read_termination = "\n"
         self.io.write_termination = "\n"
         self.ch = cfg.channel
+        self._restore: dict[str, str] = {}
 
     def idn(self) -> str:
         return self.io.query("*IDN?").strip()
 
+    def _save_trigger_state(self) -> None:
+        """Remember the trigger config so close() can put it back.
+
+        A run leaves the instrument in TRIG:SOUR BUS, which stops the S2VNA
+        display updating - the VNA looks hung to the next person who walks up
+        to it. Cheap to save, and restoring costs nothing.
+        """
+        for key, q in (("trig", "TRIG:SOUR?"), ("cont", f"INIT{self.ch}:CONT?")):
+            try:
+                self._restore[key] = self.io.query(q).strip()
+            except pyvisa.VisaIOError:
+                pass
+
     def configure(self) -> None:
+        self._save_trigger_state()
         c, k = self.ch, self.cfg
         self.io.write(f"SENS{c}:FREQ:STAR {k.start_hz:.0f}")
         self.io.write(f"SENS{c}:FREQ:STOP {k.stop_hz:.0f}")
@@ -219,6 +234,16 @@ class Vna:
             print(f"[vna] error {where}: {err}", file=sys.stderr)
 
     def close(self) -> None:
+        # Hand the instrument back the way we found it, so the front panel is
+        # live again rather than sitting frozen in bus-trigger hold.
+        try:
+            if self._restore.get("trig"):
+                self.io.write(f"TRIG:SOUR {self._restore['trig']}")
+            if self._restore.get("cont"):
+                self.io.write(f"INIT{self.ch}:CONT {self._restore['cont']}")
+            self.io.query("*OPC?")
+        except Exception:
+            pass
         try:
             self.io.close()
         except Exception:

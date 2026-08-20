@@ -7,3 +7,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .DS_Store
+
+# Measurement run outputs - commit a run deliberately if it is worth keeping
+pattern_run/
+*_run/
