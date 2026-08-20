@@ -504,8 +504,10 @@ def main(argv=None) -> int:
     p.add_argument("--zero-here", action="store_true",
                    help="define the current mechanical position as 0 deg, then scan")
     p.add_argument("--dry-run", action="store_true",
-                   help="step the positioner through every angle without the VNA; "
-                        "use this against EMControl simulation mode")
+                   help="step the positioner through every angle without opening "
+                        "the VNA. NOTE: dry means no VNA, NOT no motion - this "
+                        "issues real seek commands and WILL turn the tower unless "
+                        "EMControl is in simulation mode.")
     p.add_argument("--visa", default="",
                    help="VISA backend, e.g. '@py' for pyvisa-py (default: let pyvisa choose)")
     p.add_argument("--outdir", type=Path, default=Path("./pattern_run"))
