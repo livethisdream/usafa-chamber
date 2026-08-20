@@ -24,6 +24,27 @@ against it works unchanged on the real rig. It synthesizes an array-factor patte
 believable rate, so live position, progress and the stop button all have something
 real to exercise.
 
+## Software and drivers
+
+Neither instrument works out of the box on a fresh machine. Both of these were
+needed to get this rig talking.
+
+**EMCenter USB drivers (ETS-Lindgren)** — [`EMCenter_USB_Drivers_2.12.36.4_Signed.zip`](https://support.ets-lindgren.com/public/other/downloads/get-download?software=other&filename=EMCenter_USB_Drivers_2.12.36.4_Signed.zip&securetype=public&folder=other)
+
+Without these the chassis still enumerates — Device Manager shows *ETS-Lindgren
+EMCenter USB Device* under **Universal Serial Bus devices** and it looks healthy —
+but its virtual COM port child fails with **problem code 28**
+(`CM_PROB_FAILED_INSTALL`) and no COM port is ever assigned, so nothing can open it.
+Stock FTDI drivers do not claim ETS-Lindgren's custom PID (`VID_0403&PID_8570`).
+Installing this package produces the COM port (COM16 on this machine).
+
+**S2VNA (Copper Mountain)** — [demo software download](https://coppermountaintech.com/demo-the-software/#elementor-action%3Aaction%3Dpopup%3Aopen%26settings%3DeyJpZCI6IjIxNzcyIiwidG9nZ2xlIjpmYWxzZX0%3D)
+
+Installs to `C:\VNA\S2VNA\` rather than Program Files, which is worth knowing if you
+go looking for it. The A2202-Fx enumerates as `USB\VID_36BF&PID_1413` under device
+class `USBDevice`, so in Device Manager it appears under **Universal Serial Bus
+devices** — not Ports, and not under any VNA-sounding heading.
+
 ## At the chamber
 
 S2VNA must be **running** with its socket server enabled — *System → Misc Setup →
