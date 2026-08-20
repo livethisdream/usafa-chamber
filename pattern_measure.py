@@ -1,0 +1,433 @@
+#!/usr/bin/env python3
+"""
+Step-and-measure antenna pattern acquisition.
+
+Hardware:
+  VNA        : Copper Mountain A2202-Fx via S2VNA socket server (SCPI over TCP:5025)
+  Positioner : ETS-Lindgren EMControl 7006-001 card in an EMCenter chassis
+
+Output:
+  <outdir>/pattern.csv          angle, freq, re, im, mag_dB, phase_deg  (long format)
+  <outdir>/cut_<angle>.s2p      optional per-angle Touchstone (S21 only, others zeroed)
+  <outdir>/pattern.png          polar plot at the requested cut frequency
+
+VERIFY BEFORE FIRST RUN
+  * EMCenter command mnemonics and the slot/device prefix are centralized in
+    PositionerCmds below. Cross-check them against ETS-Lindgren manual 399342
+    (the EMCenter manual, not the 7006-001 card manual) for your firmware.
+  * Confirm the turntable is in the intended continuous / non-continuous mode.
+    Continuous ignores software limits and will happily wind up your RF cable
+    if there is no rotary joint.
+  * Run once with the EMControl simulation mode ON (Config screen) to shake out
+    the state machine with nothing physically moving.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import math
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+import pyvisa
+
+
+# --------------------------------------------------------------------------
+# Configuration
+# --------------------------------------------------------------------------
+
+@dataclass
+class VnaConfig:
+    resource: str = "TCPIP0::127.0.0.1::5025::SOCKET"
+    start_hz: float = 2.0e9
+    stop_hz: float = 3.0e9
+    points: int = 101
+    if_bw_hz: float = 1.0e3        # lower IFBW = more dynamic range, slower sweep
+    power_dbm: float = 0.0
+    parameter: str = "S21"
+    channel: int = 1
+    timeout_ms: int = 120_000
+
+
+@dataclass
+class PositionerCmds:
+    """EMCenter command mnemonics. Commands are prefixed with slot+device and
+    terminated with CR, e.g. '5B:*OPC?'. Confirm against manual 399342."""
+    slot: int = 5                  # EMCenter slot holding the 7006-001 card
+    device: str = "A"              # 'A' = Device 1, 'B' = Device 2 on that card
+    seek: str = "SK {pos:.1f}"     # seek to absolute position, degrees
+    query_pos: str = "CP?"         # current position query
+    set_pos: str = "CP {pos:.1f}"  # redefine current position (zeroing)
+    speed: str = "SP {n:d}"        # speed preset index
+    stop: str = "ST"
+    opc: str = "*OPC?"             # 0 = in motion, 1 = motion complete
+
+    @property
+    def prefix(self) -> str:
+        return f"{self.slot}{self.device}:"
+
+
+@dataclass
+class PositionerConfig:
+    # Ethernet:  'TCPIP0::192.168.1.50::inst0::INSTR'  (or a raw ::SOCKET resource)
+    # USB/serial: 'ASRL3::INSTR' at 9600,7,Odd,1 on the Holaday-compatible port
+    resource: str = "TCPIP0::192.168.1.50::inst0::INSTR"
+    timeout_ms: int = 10_000
+    write_termination: str = "\r"
+    read_termination: str = "\n"
+    speed_preset: int | None = 4
+    settle_s: float = 0.5          # mechanical ring-down after motion completes
+    move_timeout_s: float = 120.0
+    motion_start_timeout_s: float = 3.0   # grace period for the card to report motion
+    position_tol_deg: float = 0.5
+
+
+@dataclass
+class ScanConfig:
+    start_deg: float = 0.0
+    stop_deg: float = 355.0
+    step_deg: float = 5.0
+    return_home: bool = True
+    cut_freq_hz: float | None = None   # frequency for the polar plot; None = center
+    write_s2p: bool = False
+    outdir: Path = field(default_factory=lambda: Path("./pattern_run"))
+
+    def angles(self) -> np.ndarray:
+        if self.step_deg <= 0:
+            raise ValueError("step_deg must be positive")
+        span = self.stop_deg - self.start_deg
+        if span < 0:
+            raise ValueError("stop_deg must be >= start_deg")
+        # floor, not round: never command past the requested stop angle even
+        # when step_deg does not divide the span evenly.
+        n = int(math.floor(span / self.step_deg + 1e-9)) + 1
+        a = self.start_deg + self.step_deg * np.arange(n)
+        # A full 360 deg sweep would otherwise measure the start angle twice.
+        if len(a) > 1 and abs((a[-1] - a[0]) % 360.0) < 1e-9:
+            a = a[:-1]
+        return a
+
+
+# --------------------------------------------------------------------------
+# Instrument wrappers
+# --------------------------------------------------------------------------
+
+class Vna:
+    def __init__(self, rm: pyvisa.ResourceManager, cfg: VnaConfig):
+        self.cfg = cfg
+        self.io = rm.open_resource(cfg.resource)
+        self.io.timeout = cfg.timeout_ms
+        self.io.read_termination = "\n"
+        self.io.write_termination = "\n"
+        self.ch = cfg.channel
+
+    def idn(self) -> str:
+        return self.io.query("*IDN?").strip()
+
+    def configure(self) -> None:
+        c, k = self.ch, self.cfg
+        self.io.write(f"SENS{c}:FREQ:STAR {k.start_hz:.0f}")
+        self.io.write(f"SENS{c}:FREQ:STOP {k.stop_hz:.0f}")
+        self.io.write(f"SENS{c}:SWE:POIN {k.points:d}")
+        self.io.write(f"SENS{c}:BWID {k.if_bw_hz:.0f}")
+        self.io.write(f"SOUR{c}:POW {k.power_dbm:.2f}")
+
+        # one trace, the S-parameter we care about, selected for data reads
+        self.io.write(f"CALC{c}:PAR:COUN 1")
+        self.io.write(f"CALC{c}:PAR1:DEF {k.parameter}")
+        self.io.write(f"CALC{c}:PAR1:SEL")
+        self.io.write(f"CALC{c}:FORM MLOG")
+
+        # bus-triggered single sweeps: nothing runs until we ask for it
+        self.io.write("TRIG:SOUR BUS")
+        self.io.write(f"INIT{c}:CONT ON")
+        self.io.write("FORM:DATA ASC")
+        self._check_errors("after configure")
+
+    def sweep_time_s(self) -> float:
+        return float(self.io.query(f"SENS{self.ch}:SWE:TIME?"))
+
+    def frequencies(self) -> np.ndarray:
+        raw = self.io.query(f"SENS{self.ch}:FREQ:DATA?")
+        return np.fromstring(raw, sep=",")
+
+    def measure(self) -> np.ndarray:
+        """Trigger one sweep, block until done, return complex S-parameter array."""
+        self.io.write("TRIG:SING")
+        self.io.query("*OPC?")                      # blocks until the sweep completes
+        raw = self.io.query(f"CALC{self.ch}:DATA:SDAT?")
+        flat = np.fromstring(raw, sep=",")          # re, im, re, im, ...
+        if flat.size != 2 * self.cfg.points:
+            raise RuntimeError(
+                f"VNA returned {flat.size // 2} points, expected {self.cfg.points}. "
+                f"Trace/channel state does not match the configured sweep.")
+        return flat[0::2] + 1j * flat[1::2]
+
+    def _check_errors(self, where: str) -> None:
+        try:
+            err = self.io.query("SYST:ERR?").strip()
+        except pyvisa.VisaIOError:
+            return
+        if err and not err.startswith(("0", "+0")):
+            print(f"[vna] error {where}: {err}", file=sys.stderr)
+
+    def close(self) -> None:
+        try:
+            self.io.close()
+        except Exception:
+            pass
+
+
+class Positioner:
+    def __init__(self, rm: pyvisa.ResourceManager,
+                 cfg: PositionerConfig, cmds: PositionerCmds):
+        self.cfg, self.cmds = cfg, cmds
+        self.io = rm.open_resource(cfg.resource)
+        self.io.timeout = cfg.timeout_ms
+        self.io.write_termination = cfg.write_termination
+        self.io.read_termination = cfg.read_termination
+
+    def _w(self, body: str) -> None:
+        self.io.write(self.cmds.prefix + body)
+
+    def _q(self, body: str) -> str:
+        return self.io.query(self.cmds.prefix + body).strip()
+
+    def position(self) -> float:
+        return float(self._q(self.cmds.query_pos))
+
+    def in_motion(self) -> bool:
+        # *OPC? on this card returns 0 while moving, 1 when motion is complete
+        return self._q(self.cmds.opc).strip() not in ("1", "+1")
+
+    def set_speed(self, n: int) -> None:
+        self._w(self.cmds.speed.format(n=n))
+
+    def stop(self) -> None:
+        self._w(self.cmds.stop)
+
+    def zero_here(self) -> None:
+        self._w(self.cmds.set_pos.format(pos=0.0))
+
+    def seek(self, deg: float) -> float:
+        """Command an absolute move and block until the tower is verifiably parked
+        at `deg`. Arrival is confirmed by position readback, never by elapsed time:
+        a sweep taken while the tower is still turning is silently corrupt."""
+        if abs(_wrap180(self.position() - deg)) <= self.cfg.position_tol_deg:
+            return self.position()          # already parked; no move to wait on
+
+        self._w(self.cmds.seek.format(pos=deg))
+
+        # Wait for motion to actually BEGIN. Polling in_motion() after a fixed
+        # sleep races the card: if it has not started yet we see "not moving"
+        # and sweep mid-rotation.
+        t0 = time.monotonic()
+        started = False
+        while time.monotonic() - t0 < self.cfg.motion_start_timeout_s:
+            if self.in_motion():
+                started = True
+                break
+            time.sleep(0.05)
+
+        deadline = time.monotonic() + self.cfg.move_timeout_s
+        while self.in_motion():
+            if time.monotonic() > deadline:
+                self.stop()
+                raise TimeoutError(f"positioner did not reach {deg:.1f} deg in time")
+            time.sleep(0.1)
+
+        time.sleep(self.cfg.settle_s)                # mechanical ring-down
+        actual = self.position()
+        err = abs(_wrap180(actual - deg))
+        if err > self.cfg.position_tol_deg:
+            if not started:
+                # Never saw motion and we are not where we asked to be: the seek
+                # did not take. Refuse to measure rather than log a bad cut.
+                raise RuntimeError(
+                    f"positioner never moved: asked {deg:.1f} deg, still at "
+                    f"{actual:.1f} deg. Check the slot/device prefix "
+                    f"({self.cmds.prefix!r}) and the seek mnemonic.")
+            print(f"[pos] warning: asked {deg:.1f}, read {actual:.1f} "
+                  f"({err:.2f} deg error)", file=sys.stderr)
+        return actual
+
+    def close(self) -> None:
+        try:
+            self.io.close()
+        except Exception:
+            pass
+
+
+def _wrap180(x: float) -> float:
+    return (x + 180.0) % 360.0 - 180.0
+
+
+# --------------------------------------------------------------------------
+# Acquisition
+# --------------------------------------------------------------------------
+
+def run_scan(vna: Vna, pos: Positioner, scan: ScanConfig):
+    scan.outdir.mkdir(parents=True, exist_ok=True)
+    freqs = vna.frequencies()
+    angles = scan.angles()
+    data = np.zeros((len(angles), len(freqs)), dtype=complex)
+    actual = np.zeros(len(angles))
+
+    csv_path = scan.outdir / "pattern.csv"
+    with csv_path.open("w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["angle_cmd_deg", "angle_actual_deg", "freq_hz",
+                    "re", "im", "mag_db", "phase_deg"])
+
+        for i, ang in enumerate(angles):
+            actual[i] = pos.seek(float(ang))
+            s = vna.measure()
+            vna._check_errors(f"at {ang:.2f} deg")
+            data[i, :] = s
+
+            mag_db = 20.0 * np.log10(np.maximum(np.abs(s), 1e-15))
+            phase = np.degrees(np.angle(s))
+            for f, sv, m, p in zip(freqs, s, mag_db, phase):
+                w.writerow([f"{ang:.2f}", f"{actual[i]:.2f}", f"{f:.0f}",
+                            f"{sv.real:.9e}", f"{sv.imag:.9e}",
+                            f"{m:.4f}", f"{p:.4f}"])
+            fh.flush()
+
+            if scan.write_s2p:
+                _write_s2p(scan.outdir / f"cut_{ang:07.2f}.s2p", freqs, s)
+
+            print(f"  {ang:7.2f} deg (read {actual[i]:7.2f})  "
+                  f"peak {mag_db.max():7.2f} dB", flush=True)
+
+    print(f"\nwrote {csv_path}")
+    return angles, actual, freqs, data
+
+
+def _write_s2p(path: Path, freqs: np.ndarray, s21: np.ndarray) -> None:
+    """Minimal Touchstone. Only S21 is populated; the rest are zero-filled."""
+    with path.open("w") as fh:
+        fh.write("! Antenna pattern cut, S21 only\n")
+        fh.write("# HZ S RI R 50\n")
+        for f, s in zip(freqs, s21):
+            fh.write(f"{f:.0f} 0 0 {s.real:.9e} {s.imag:.9e} 0 0 0 0\n")
+
+
+# --------------------------------------------------------------------------
+# Plot
+# --------------------------------------------------------------------------
+
+def polar_plot(angles, freqs, data, scan: ScanConfig, normalize=True):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    f_target = scan.cut_freq_hz if scan.cut_freq_hz else float(freqs[len(freqs) // 2])
+    k = int(np.argmin(np.abs(freqs - f_target)))
+    cut = 20.0 * np.log10(np.maximum(np.abs(data[:, k]), 1e-15))
+    if normalize:
+        cut = cut - cut.max()
+
+    th = np.radians(angles)
+    th = np.append(th, th[0])          # close the trace
+    r = np.append(cut, cut[0])
+
+    fig = plt.figure(figsize=(6, 6))
+    ax = fig.add_subplot(111, projection="polar")
+    ax.plot(th, r, lw=1.6)
+    ax.set_theta_zero_location("N")
+    ax.set_theta_direction(-1)
+    ax.set_ylim(-40, 0 if normalize else float(np.ceil(r.max())))
+    ax.set_rlabel_position(135)
+    ax.grid(True, alpha=0.4)
+    ax.set_title(f"Pattern @ {freqs[k]/1e9:.4f} GHz"
+                 f"{' (normalized)' if normalize else ''}", pad=18)
+
+    out = scan.outdir / "pattern.png"
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    print(f"wrote {out}")
+    return out
+
+
+# --------------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------------
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--vna", default=VnaConfig.resource)
+    p.add_argument("--pos", default=PositionerConfig.resource)
+    p.add_argument("--slot", type=int, default=PositionerCmds.slot)
+    p.add_argument("--device", default=PositionerCmds.device, choices=["A", "B"])
+    p.add_argument("--start-ghz", type=float, default=VnaConfig.start_hz / 1e9)
+    p.add_argument("--stop-ghz", type=float, default=VnaConfig.stop_hz / 1e9)
+    p.add_argument("--points", type=int, default=VnaConfig.points)
+    p.add_argument("--ifbw", type=float, default=VnaConfig.if_bw_hz)
+    p.add_argument("--power", type=float, default=VnaConfig.power_dbm)
+    p.add_argument("--param", default=VnaConfig.parameter)
+    p.add_argument("--step", type=float, default=ScanConfig.step_deg)
+    p.add_argument("--from-deg", type=float, default=ScanConfig.start_deg)
+    p.add_argument("--to-deg", type=float, default=ScanConfig.stop_deg)
+    p.add_argument("--cut-ghz", type=float, default=None)
+    p.add_argument("--s2p", action="store_true", help="also write per-angle Touchstone")
+    p.add_argument("--zero-here", action="store_true",
+                   help="define the current mechanical position as 0 deg, then scan")
+    p.add_argument("--outdir", type=Path, default=Path("./pattern_run"))
+    a = p.parse_args(argv)
+
+    vcfg = VnaConfig(resource=a.vna, start_hz=a.start_ghz * 1e9,
+                     stop_hz=a.stop_ghz * 1e9, points=a.points,
+                     if_bw_hz=a.ifbw, power_dbm=a.power, parameter=a.param)
+    pcfg = PositionerConfig(resource=a.pos)
+    cmds = PositionerCmds(slot=a.slot, device=a.device)
+    scan = ScanConfig(start_deg=a.from_deg, stop_deg=a.to_deg, step_deg=a.step,
+                      cut_freq_hz=(a.cut_ghz * 1e9 if a.cut_ghz else None),
+                      write_s2p=a.s2p, outdir=a.outdir)
+
+    rm = pyvisa.ResourceManager()
+    vna = pos = None
+    try:
+        vna = Vna(rm, vcfg)
+        print(f"VNA : {vna.idn()}")
+        vna.configure()
+        print(f"      {vcfg.points} pts, {vcfg.start_hz/1e9:.3f}-{vcfg.stop_hz/1e9:.3f} GHz, "
+              f"IFBW {vcfg.if_bw_hz:.0f} Hz, sweep {vna.sweep_time_s()*1e3:.1f} ms")
+
+        pos = Positioner(rm, pcfg, cmds)
+        if pcfg.speed_preset is not None:
+            pos.set_speed(pcfg.speed_preset)
+        if a.zero_here:
+            pos.zero_here()
+        print(f"POS : slot {cmds.slot} device {cmds.device}, "
+              f"at {pos.position():.2f} deg")
+
+        n = len(scan.angles())
+        est = n * (vna.sweep_time_s() + pcfg.settle_s + scan.step_deg * 0.2)
+        print(f"\nscanning {n} points, rough estimate {est/60:.1f} min\n")
+
+        angles, actual, freqs, data = run_scan(vna, pos, scan)
+        polar_plot(angles, freqs, data, scan)
+
+        if scan.return_home:
+            print("returning to start position...")
+            pos.seek(scan.start_deg)
+
+    except KeyboardInterrupt:
+        print("\ninterrupted - stopping positioner", file=sys.stderr)
+        if pos is not None:
+            pos.stop()
+        return 130
+    finally:
+        if vna is not None:
+            vna.close()
+        if pos is not None:
+            pos.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

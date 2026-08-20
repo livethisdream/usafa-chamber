@@ -1,0 +1,18 @@
+[project]
+name = "usafa-chamber"
+version = "0.1.0"
+description = "Antenna pattern acquisition for the USAFA anechoic chamber"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pyvisa>=1.14",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+# Pure-Python VISA backend. Useful when no vendor VISA (NI/Keysight) is
+# installed, and for the EMCenter's serial interface via ASRL resources.
+sim = ["pyvisa-py>=0.7", "pyserial>=3.5"]
+
+[tool.uv]
+package = false
