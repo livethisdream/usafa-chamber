@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -56,13 +57,27 @@ class VnaConfig:
 @dataclass
 class PositionerCmds:
     """EMCenter command mnemonics. Commands are prefixed with slot+device and
-    terminated with CR, e.g. '5B:*OPC?'. Confirm against manual 399342."""
-    slot: int = 5                  # EMCenter slot holding the 7006-001 card
+    terminated with CR, e.g. '1A:*OPC?'.
+
+    Verified 2026-08-20 by read-only probe against EMCenter firmware 4.6.0 with
+    an EMControl 7006-001 (2.10.3) in slot 1, device A:
+      1A:*IDN?  -> 'ETS-Lindgren, EMControl 7006-001, 2.10.3'
+      1A:CP?    -> '90.0 DEGREES'      (value carries units - must be parsed)
+      1A:*OPC?  -> '1'                 (1 = complete, as assumed)
+      1A:SPEED? -> '100.0'             (percent of max, NOT a 1-4 preset index)
+      1A:ACC?   -> '2.0'
+      1A:ERR?   -> '0'
+    'SP?', 'UL?', 'LL?' and 'MODE?' all return ERROR 1 on this firmware - there
+    is no over-the-wire limit or continuous-mode query, so the cable-wrap
+    configuration has to be confirmed on the EMControl front panel."""
+    slot: int = 1                  # EMCenter slot holding the 7006-001 card
     device: str = "A"              # 'A' = Device 1, 'B' = Device 2 on that card
     seek: str = "SK {pos:.1f}"     # seek to absolute position, degrees
     query_pos: str = "CP?"         # current position query
     set_pos: str = "CP {pos:.1f}"  # redefine current position (zeroing)
-    speed: str = "SP {n:d}"        # speed preset index
+    speed: str = "SPEED {n:.1f}"   # speed as percent of maximum
+    query_speed: str = "SPEED?"
+    query_err: str = "ERR?"        # 0 = no error latched
     stop: str = "ST"
     opc: str = "*OPC?"             # 0 = in motion, 1 = motion complete
 
@@ -73,13 +88,20 @@ class PositionerCmds:
 
 @dataclass
 class PositionerConfig:
-    # Ethernet:  'TCPIP0::192.168.1.50::inst0::INSTR'  (or a raw ::SOCKET resource)
-    # USB/serial: 'ASRL3::INSTR' at 9600,7,Odd,1 on the Holaday-compatible port
-    resource: str = "TCPIP0::192.168.1.50::inst0::INSTR"
+    # USB/serial (this rig): the EMCenter's FTDI virtual COM port. Framing is
+    # 115200 8N1 - the 9600,7,Odd,1 in ETS-Lindgren's docs describes the legacy
+    # Holaday-compatible rear port, NOT the USB port. Verified 2026-08-20:
+    # 9600 (both 7O1 and 8N1) times out, 115200 8N1 answers.
+    # Ethernet alternative: 'TCPIP0::<host>::inst0::INSTR'.
+    resource: str = "ASRL16::INSTR"
+    baud_rate: int = 115_200
+    data_bits: int = 8
+    parity: str = "none"           # 'none' | 'odd' | 'even'
     timeout_ms: int = 10_000
     write_termination: str = "\r"
     read_termination: str = "\n"
-    speed_preset: int | None = 4
+    drain_timeout_ms: int = 400    # bounded read after a write, to catch 'ERROR n'
+    speed_percent: float | None = None   # None = leave the card's speed alone
     settle_s: float = 0.5          # mechanical ring-down after motion completes
     move_timeout_s: float = 120.0
     motion_start_timeout_s: float = 3.0   # grace period for the card to report motion
@@ -190,22 +212,65 @@ class Positioner:
         self.io.timeout = cfg.timeout_ms
         self.io.write_termination = cfg.write_termination
         self.io.read_termination = cfg.read_termination
+        # Serial framing must be applied explicitly. Leaving it unset silently
+        # falls back to pyvisa's 9600 8N1 default, which this chassis ignores -
+        # every query then times out and the rig looks disconnected.
+        if cfg.resource.upper().startswith("ASRL"):
+            import pyvisa.constants as _pc
+            self.io.baud_rate = cfg.baud_rate
+            self.io.data_bits = cfg.data_bits
+            self.io.parity = {"none": _pc.Parity.none,
+                              "odd": _pc.Parity.odd,
+                              "even": _pc.Parity.even}[cfg.parity]
 
     def _w(self, body: str) -> None:
+        """Write, then drain any reply. The EMCenter answers malformed or
+        unsupported commands with an 'ERROR n' line. A write that leaves that
+        line unread desynchronizes every later query, which then reads the
+        previous command's error instead of its own answer."""
         self.io.write(self.cmds.prefix + body)
+        saved, self.io.timeout = self.io.timeout, self.cfg.drain_timeout_ms
+        try:
+            reply = self.io.read().strip()
+        except pyvisa.VisaIOError:
+            reply = ""              # silence is the success case
+        finally:
+            self.io.timeout = saved
+        if reply and reply.upper().startswith("ERROR"):
+            raise RuntimeError(f"positioner rejected {body!r}: {reply}")
 
     def _q(self, body: str) -> str:
-        return self.io.query(self.cmds.prefix + body).strip()
+        reply = self.io.query(self.cmds.prefix + body).strip()
+        if reply.upper().startswith("ERROR"):
+            raise RuntimeError(f"positioner rejected {body!r}: {reply}")
+        return reply
+
+    @staticmethod
+    def _deg(reply: str) -> float:
+        """Parse a numeric reply. The card answers with units, e.g. '90.0 DEGREES'."""
+        m = re.search(r"[-+]?\d+(?:\.\d+)?", reply)
+        if not m:
+            raise RuntimeError(f"unparseable reply: {reply!r}")
+        return float(m.group())
 
     def position(self) -> float:
-        return float(self._q(self.cmds.query_pos))
+        return self._deg(self._q(self.cmds.query_pos))
 
     def in_motion(self) -> bool:
         # *OPC? on this card returns 0 while moving, 1 when motion is complete
-        return self._q(self.cmds.opc).strip() not in ("1", "+1")
+        return self._q(self.cmds.opc) not in ("1", "+1")
 
-    def set_speed(self, n: int) -> None:
-        self._w(self.cmds.speed.format(n=n))
+    def speed(self) -> float:
+        return self._deg(self._q(self.cmds.query_speed))
+
+    def latched_error(self) -> str:
+        return self._q(self.cmds.query_err)
+
+    def identity(self) -> str:
+        return self._q("*IDN?")
+
+    def set_speed(self, pct: float) -> None:
+        self._w(self.cmds.speed.format(n=pct))
 
     def stop(self) -> None:
         self._w(self.cmds.stop)
@@ -362,6 +427,8 @@ def main(argv=None) -> int:
     p.add_argument("--vna", default=VnaConfig.resource)
     p.add_argument("--pos", default=PositionerConfig.resource)
     p.add_argument("--slot", type=int, default=PositionerCmds.slot)
+    p.add_argument("--speed", type=float, default=None,
+                   help="positioner speed, percent of max (default: leave unchanged)")
     p.add_argument("--device", default=PositionerCmds.device, choices=["A", "B"])
     p.add_argument("--start-ghz", type=float, default=VnaConfig.start_hz / 1e9)
     p.add_argument("--stop-ghz", type=float, default=VnaConfig.stop_hz / 1e9)
@@ -382,7 +449,7 @@ def main(argv=None) -> int:
     vcfg = VnaConfig(resource=a.vna, start_hz=a.start_ghz * 1e9,
                      stop_hz=a.stop_ghz * 1e9, points=a.points,
                      if_bw_hz=a.ifbw, power_dbm=a.power, parameter=a.param)
-    pcfg = PositionerConfig(resource=a.pos)
+    pcfg = PositionerConfig(resource=a.pos, speed_percent=a.speed)
     cmds = PositionerCmds(slot=a.slot, device=a.device)
     scan = ScanConfig(start_deg=a.from_deg, stop_deg=a.to_deg, step_deg=a.step,
                       cut_freq_hz=(a.cut_ghz * 1e9 if a.cut_ghz else None),
@@ -398,12 +465,14 @@ def main(argv=None) -> int:
               f"IFBW {vcfg.if_bw_hz:.0f} Hz, sweep {vna.sweep_time_s()*1e3:.1f} ms")
 
         pos = Positioner(rm, pcfg, cmds)
-        if pcfg.speed_preset is not None:
-            pos.set_speed(pcfg.speed_preset)
+        if pcfg.speed_percent is not None:
+            pos.set_speed(pcfg.speed_percent)
         if a.zero_here:
             pos.zero_here()
-        print(f"POS : slot {cmds.slot} device {cmds.device}, "
-              f"at {pos.position():.2f} deg")
+        print(f"POS : {pos.identity()}")
+        print(f"      slot {cmds.slot} device {cmds.device}, "
+              f"at {pos.position():.2f} deg, speed {pos.speed():.1f}%, "
+              f"err {pos.latched_error()}")
 
         n = len(scan.angles())
         est = n * (vna.sweep_time_s() + pcfg.settle_s + scan.step_deg * 0.2)

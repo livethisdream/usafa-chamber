@@ -1,5 +1,8 @@
-.venv-linux/
-.venv-win/
+# Venvs live outside the tree (OneDrive syncs venv contents); these are a
+# Windows junction and a WSL symlink. Match without a trailing slash: Windows
+# git cannot stat the WSL symlink's reparse tag, so ".venv-linux/" misses it.
+.venv-linux
+.venv-win
 __pycache__/
 .pytest_cache/
 .mypy_cache/
