@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -12,164 +12,418 @@
 <body>
   <div class="app-container">
 
-    <header class="glass-panel glass-header">
-      <div class="header-left">
-        <span class="app-wordmark">CHAMBER</span>
-        <span class="subtitle" id="subtitle">antenna pattern acquisition</span>
-      </div>
-      <div class="header-actions">
-        <span class="status-pill mock" id="pill-mock" hidden>MOCK</span>
-        <span class="status-pill" id="pill-state">
-          <span class="dot disconnected" id="dot-link"></span>
-          <span id="state-text">offline</span>
-        </span>
-        <button class="btn btn-small" id="btn-theme" title="Switch theme">◐</button>
-      </div>
-    </header>
+    <main class="dashboard" id="dashboard">
 
-    <main class="dashboard">
+      <!-- Controls column (accordion) -->
+      <aside class="controls-panel glass-panel" id="settings-panel">
 
-      <aside class="controls-panel glass-panel">
-        <div>
-          <div class="panel-title">Sweep</div>
-          <div class="field-row">
-            <div class="control-group">
-              <label for="start-ghz">Start (GHz)</label>
-              <input class="modern-input" type="number" id="start-ghz" value="2.0" step="0.01" />
-            </div>
-            <div class="control-group">
-              <label for="stop-ghz">Stop (GHz)</label>
-              <input class="modern-input" type="number" id="stop-ghz" value="3.0" step="0.01" />
-            </div>
-          </div>
-          <div class="field-row">
-            <div class="control-group">
-              <label for="points">Points</label>
-              <input class="modern-input" type="number" id="points" value="101" min="2" />
-            </div>
-            <div class="control-group">
-              <label for="ifbw">IF BW (Hz)</label>
-              <input class="modern-input" type="number" id="ifbw" value="1000" min="1" />
-            </div>
-          </div>
-          <div class="field-row">
-            <div class="control-group">
-              <label for="power">Power (dBm)</label>
-              <input class="modern-input" type="number" id="power" value="0" step="0.5" />
-            </div>
-            <div class="control-group">
-              <label for="param">Parameter</label>
-              <select class="modern-select" id="param">
-                <option>S21</option>
-                <option>S12</option>
-                <option>S11</option>
-                <option>S22</option>
-              </select>
-            </div>
-          </div>
+        <!-- Icon rail, shown when the panel is collapsed -->
+        <div class="sidebar-icons" id="sidebar-icons">
+          <button class="sidebar-icon-btn" id="btn-toggle-settings-icon" title="Expand settings" aria-label="Expand settings" style="border-color: var(--primary); color: var(--primary);">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 5.5h14v13H5z"></path>
+              <path d="M9 5.5v13"></path>
+              <path d="M13.5 12h3"></path>
+              <path d="M15 10.5l1.5 1.5-1.5 1.5"></path>
+            </svg>
+          </button>
+          <button class="sidebar-icon-btn" data-section="0" title="VNA" aria-label="VNA">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3.5 6.5h17v11h-17z"></path>
+              <path d="M6 14c1.6 0 1.6-4 3.2-4s1.6 4 3.2 4 1.6-4 3.2-4 1.6 4 3.2 4"></path>
+            </svg>
+          </button>
+          <button class="sidebar-icon-btn" data-section="1" title="Turntable" aria-label="Turntable">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="7.5"></circle>
+              <circle cx="12" cy="12" r="1.6"></circle>
+              <path d="M12 4.5V2.6"></path>
+              <path d="M18.6 8.4a7.5 7.5 0 0 1-2.2 9.6"></path>
+              <path d="M16.6 15.4l-.2 2.6 2.6-.3"></path>
+            </svg>
+          </button>
+          <button class="sidebar-icon-btn" data-section="2" title="Simulation" aria-label="Simulation">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3.5 18.5h17"></path>
+              <path d="M4.5 15c2.5 0 3.2-8 5.7-8s3.2 8 5.7 8 2.3-4 3.6-4"></path>
+              <path d="M4.5 18c2.5 0 3.6-5.5 5.7-5.5s3.6 5.5 5.7 5.5" stroke-dasharray="2.4 2.2"></path>
+            </svg>
+          </button>
+          <button class="sidebar-icon-btn" data-section="3" title="Output" aria-label="Output">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 4.5h9.5L19 9v10.5H5z"></path>
+              <path d="M14 4.5V9h5"></path>
+              <path d="M8.5 13.5h7M8.5 16.5h4.5"></path>
+            </svg>
+          </button>
+          <div class="sidebar-icons-spacer"></div>
+          <button class="sidebar-icon-btn" id="btn-theme-icon" title="Theme: system" aria-label="Theme: system">
+            <svg viewBox="0 0 24 24" aria-hidden="true" class="icon-system">
+              <rect x="3" y="5" width="18" height="12" rx="1.5"></rect>
+              <path d="M9 20.5h6M12 17v3.5"></path>
+            </svg>
+            <svg viewBox="0 0 24 24" aria-hidden="true" class="icon-moon" style="display:none">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+            </svg>
+            <svg viewBox="0 0 24 24" aria-hidden="true" class="icon-sun" style="display:none">
+              <circle cx="12" cy="12" r="5"></circle>
+              <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
+            </svg>
+          </button>
         </div>
 
-        <div class="divider"></div>
+        <!-- Full sidebar, shown when expanded -->
+        <div id="sidebar-content">
+          <div class="panel-header-row">
+            <h2 class="panel-title">Settings</h2>
+            <button class="btn btn-outline btn-small icon-toggle-btn" id="btn-toggle-settings" title="Collapse settings" aria-label="Collapse settings">−</button>
+          </div>
 
-        <div>
-          <div class="panel-title">Scan</div>
-          <div class="field-row">
-            <div class="control-group">
-              <label for="from-deg">From (deg)</label>
-              <input class="modern-input" type="number" id="from-deg" value="-180" step="1" />
-            </div>
-            <div class="control-group">
-              <label for="to-deg">To (deg)</label>
-              <input class="modern-input" type="number" id="to-deg" value="175" step="1" />
-            </div>
-          </div>
-          <div class="field-row">
-            <div class="control-group">
-              <label for="step-deg">Step (deg)</label>
-              <input class="modern-input" type="number" id="step-deg" value="5" step="0.1" min="0.1" />
-            </div>
-            <div class="control-group">
-              <label for="cut-ghz">Cut freq (GHz)</label>
-              <input class="modern-input" type="number" id="cut-ghz" placeholder="center" step="0.01" />
-            </div>
-          </div>
-          <div class="control-group">
-            <label>
-              <input type="checkbox" id="closure" checked /> Closure check (re-measure start angle)
-            </label>
-            <label>
-              <input type="checkbox" id="return-home" checked /> Return home when finished
-            </label>
-          </div>
-        </div>
+          <div class="accordion" id="accordionSettings">
 
-        <div class="divider"></div>
-
-        <div>
-          <div class="panel-title">Instruments</div>
-          <div class="control-group">
-            <label for="vna-res">VNA resource</label>
-            <input class="modern-input" type="text" id="vna-res" value="TCPIP0::127.0.0.1::5025::SOCKET" />
-          </div>
-          <div class="control-group">
-            <label for="pos-res">Positioner resource</label>
-            <input class="modern-input" type="text" id="pos-res" value="TCPIP0::192.168.1.50::5025::SOCKET" />
-          </div>
-          <div class="field-row">
-            <div class="control-group">
-              <label for="slot">Slot</label>
-              <input class="modern-input" type="number" id="slot" value="5" min="1" />
+            <!-- 0. VNA -->
+            <div class="accordion-item active">
+              <button class="accordion-header" title="Copper Mountain sweep settings and the VISA resource that reaches it">
+                <span class="accordion-head-left"><span class="accordion-icon" data-icon="0"></span> VNA</span>
+                <span class="chevron">▼</span>
+              </button>
+              <div class="accordion-body">
+                <div class="control-group">
+                  <label for="vna-res">Resource</label>
+                  <input class="modern-input" type="text" id="vna-res" value="TCPIP0::127.0.0.1::5025::SOCKET" />
+                </div>
+                <div class="field-row">
+                  <div class="control-group">
+                    <label for="start-ghz">Start (GHz)</label>
+                    <input class="modern-input" type="number" id="start-ghz" value="2.0" step="0.01" />
+                  </div>
+                  <div class="control-group">
+                    <label for="stop-ghz">Stop (GHz)</label>
+                    <input class="modern-input" type="number" id="stop-ghz" value="3.0" step="0.01" />
+                  </div>
+                </div>
+                <div class="field-row">
+                  <div class="control-group">
+                    <label for="points">Points</label>
+                    <input class="modern-input" type="number" id="points" value="101" min="2" />
+                  </div>
+                  <div class="control-group">
+                    <label for="ifbw">IF BW (Hz)</label>
+                    <input class="modern-input" type="number" id="ifbw" value="1000" min="1" />
+                  </div>
+                </div>
+                <div class="field-row">
+                  <div class="control-group">
+                    <label for="power">Power (dBm)</label>
+                    <input class="modern-input" type="number" id="power" value="0" step="0.5" />
+                  </div>
+                  <div class="control-group">
+                    <label for="param">Parameter</label>
+                    <select class="modern-select" id="param">
+                      <option>S21</option>
+                      <option>S12</option>
+                      <option>S11</option>
+                      <option>S22</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="field-row">
+                  <div class="control-group">
+                    <label for="aux-param" title="Second parameter captured alongside the main one — S11 catches a connection change mid-run">Aux parameter</label>
+                    <select class="modern-select" id="aux-param">
+                      <option value="">none</option>
+                      <option>S11</option>
+                      <option>S22</option>
+                      <option>S12</option>
+                      <option>S21</option>
+                    </select>
+                  </div>
+                  <div class="control-group">
+                    <label for="averaging" title="Sweeps averaged per angle; 0 turns averaging off">Averaging</label>
+                    <input class="modern-input" type="number" id="averaging" value="0" min="0" />
+                  </div>
+                </div>
+                <div class="field-row">
+                  <div class="control-group">
+                    <label for="channel">Channel</label>
+                    <input class="modern-input" type="number" id="channel" value="1" min="1" />
+                  </div>
+                  <div class="control-group">
+                    <label for="vna-timeout">Timeout (s)</label>
+                    <input class="modern-input" type="number" id="vna-timeout" value="120" min="1" />
+                  </div>
+                </div>
+              </div>
             </div>
-            <div class="control-group">
-              <label for="device">Device</label>
-              <select class="modern-select" id="device"><option>A</option><option>B</option></select>
-            </div>
-          </div>
-        </div>
 
-        <div class="action-row">
-          <button class="btn btn-primary" id="btn-start">Start scan</button>
-          <button class="btn btn-danger" id="btn-abort" disabled>Abort</button>
+            <!-- 1. Turntable -->
+            <div class="accordion-item">
+              <button class="accordion-header" title="EMControl positioner card, the angle grid, and the motion tolerances">
+                <span class="accordion-head-left"><span class="accordion-icon" data-icon="1"></span> Turntable</span>
+                <span class="chevron">▼</span>
+              </button>
+              <div class="accordion-body">
+                <div class="control-group">
+                  <label for="pos-res">Resource</label>
+                  <input class="modern-input" type="text" id="pos-res" value="TCPIP0::192.168.1.50::5025::SOCKET" />
+                </div>
+                <div class="field-row">
+                  <div class="control-group">
+                    <label for="slot">Slot</label>
+                    <input class="modern-input" type="number" id="slot" value="5" min="1" />
+                  </div>
+                  <div class="control-group">
+                    <label for="device">Device</label>
+                    <select class="modern-select" id="device"><option>A</option><option>B</option></select>
+                  </div>
+                </div>
+                <hr class="divider" />
+                <div class="field-row">
+                  <div class="control-group">
+                    <label for="from-deg">From (deg)</label>
+                    <input class="modern-input" type="number" id="from-deg" value="-180" step="1" />
+                  </div>
+                  <div class="control-group">
+                    <label for="to-deg">To (deg)</label>
+                    <input class="modern-input" type="number" id="to-deg" value="175" step="1" />
+                  </div>
+                </div>
+                <div class="field-row">
+                  <div class="control-group">
+                    <label for="step-deg">Step (deg)</label>
+                    <input class="modern-input" type="number" id="step-deg" value="5" step="0.1" min="0.1" />
+                  </div>
+                  <div class="control-group">
+                    <label for="speed-preset" title="EMControl speed preset index">Speed preset</label>
+                    <input class="modern-input" type="number" id="speed-preset" value="4" min="1" max="8" />
+                  </div>
+                </div>
+                <div class="field-row">
+                  <div class="control-group">
+                    <label for="settle-s" title="Mechanical ring-down waited out after motion completes">Settle (s)</label>
+                    <input class="modern-input" type="number" id="settle-s" value="0.5" step="0.1" min="0" />
+                  </div>
+                  <div class="control-group">
+                    <label for="backlash-deg" title="Above zero, every angle is approached from below to take up lash">Backlash (deg)</label>
+                    <input class="modern-input" type="number" id="backlash-deg" value="0" step="0.1" min="0" />
+                  </div>
+                </div>
+                <div class="field-row">
+                  <div class="control-group">
+                    <label for="tol-deg">Tolerance (deg)</label>
+                    <input class="modern-input" type="number" id="tol-deg" value="0.5" step="0.1" min="0.01" />
+                  </div>
+                  <div class="control-group">
+                    <label for="move-timeout">Move timeout (s)</label>
+                    <input class="modern-input" type="number" id="move-timeout" value="120" min="1" />
+                  </div>
+                </div>
+                <label class="toggle-container mt-2" title="Re-measure the start angle at the end to catch drift">
+                  <span>Closure check</span>
+                  <input type="checkbox" id="closure" checked /><span class="checkmark"></span>
+                </label>
+                <label class="toggle-container mt-2">
+                  <span>Return home when finished</span>
+                  <input type="checkbox" id="return-home" checked /><span class="checkmark"></span>
+                </label>
+              </div>
+            </div>
+
+            <!-- 2. Simulation -->
+            <div class="accordion-item">
+              <button class="accordion-header" title="Import a simulated or previously measured pattern and compare it against the live cut">
+                <span class="accordion-head-left"><span class="accordion-icon" data-icon="2"></span> Simulation</span>
+                <span class="chevron">▼</span>
+              </button>
+              <div class="accordion-body">
+                <div class="control-group">
+                  <label for="ref-file">Import pattern</label>
+                  <input class="file-input" type="file" id="ref-file" accept=".csv,.txt" />
+                  <p class="hint">
+                    A run's <code>pattern.csv</code>, or any CSV with angle and dB
+                    columns.
+                  </p>
+                </div>
+                <div class="ref-summary" id="ref-summary" hidden>
+                  <div class="ref-name" id="ref-name">—</div>
+                  <div class="field-row">
+                    <div class="control-group">
+                      <label for="ref-param">Parameter</label>
+                      <select class="modern-select" id="ref-param"></select>
+                    </div>
+                    <div class="control-group">
+                      <label for="ref-freq">Frequency</label>
+                      <select class="modern-select" id="ref-freq"></select>
+                    </div>
+                  </div>
+                  <label class="toggle-container mt-2">
+                    <span>Overlay on pattern</span>
+                    <input type="checkbox" id="ref-show" checked /><span class="checkmark"></span>
+                  </label>
+                  <label class="toggle-container mt-2" title="Align the reference peak with the measured peak before differencing">
+                    <span>Normalize to peak</span>
+                    <input type="checkbox" id="ref-normalize" checked /><span class="checkmark"></span>
+                  </label>
+                  <div class="field-row mt-2">
+                    <div class="control-group">
+                      <label for="ref-rotate" title="Rotate the reference to line up a mount offset">Rotate (deg)</label>
+                      <input class="modern-input" type="number" id="ref-rotate" value="0" step="1" />
+                    </div>
+                    <div class="control-group">
+                      <label>&nbsp;</label>
+                      <button class="btn btn-outline btn-small full" id="btn-ref-clear">Clear</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 3. Output -->
+            <div class="accordion-item">
+              <button class="accordion-header" title="Where the run is written and which files it produces">
+                <span class="accordion-head-left"><span class="accordion-icon" data-icon="3"></span> Output</span>
+                <span class="chevron">▼</span>
+              </button>
+              <div class="accordion-body">
+                <div class="control-group">
+                  <label for="outdir" title="Left empty, the service stamps a directory under its output root">Run directory</label>
+                  <input class="modern-input" type="text" id="outdir" placeholder="auto — service stamps a name" />
+                </div>
+                <div class="field-row">
+                  <div class="control-group">
+                    <label for="cut-ghz" title="Frequency the polar cut is taken at; empty means the sweep center">Cut freq (GHz)</label>
+                    <input class="modern-input" type="number" id="cut-ghz" placeholder="center" step="0.01" />
+                  </div>
+                  <div class="control-group">
+                    <label for="db-floor" title="Polar plot floor in dB below the peak">dB floor</label>
+                    <input class="modern-input" type="number" id="db-floor" value="-40" step="5" max="-5" />
+                  </div>
+                </div>
+                <label class="toggle-container mt-2" title="One Touchstone file per angle, alongside pattern.csv">
+                  <span>Write .s2p per angle</span>
+                  <input type="checkbox" id="write-s2p" /><span class="checkmark"></span>
+                </label>
+                <label class="toggle-container mt-2">
+                  <span>Write pattern.png</span>
+                  <input type="checkbox" id="write-plot" checked /><span class="checkmark"></span>
+                </label>
+                <p class="hint">
+                  Every run writes <code>pattern.csv</code> and
+                  <code>run_meta.json</code> regardless.
+                </p>
+              </div>
+            </div>
+
+          </div>
+
+          <div class="action-row">
+            <button class="btn btn-outline btn-small" id="btn-connect" title="Open the instruments without starting a scan">Connect instruments</button>
+          </div>
+
+          <!-- Theme toggle, bottom of the sidebar -->
+          <div class="sidebar-footer">
+            <button class="btn btn-outline btn-small theme-toggle" id="btn-theme" title="Theme: system" aria-label="Theme: system">
+              <span class="theme-icon">◐</span>
+              <span class="theme-label">System theme</span>
+            </button>
+          </div>
         </div>
       </aside>
 
-      <div class="plots-stack">
-        <section class="glass-panel graph-panel">
-          <div class="panel-header-row">
-            <div style="display:flex; align-items:center; gap:0.5rem;">
-              <h3 style="font-size:0.86rem; font-weight:600;">Pattern</h3>
-              <span class="status-pill" id="pill-phase">idle</span>
-            </div>
-            <div class="chart-stats">
-              <div class="stat-box"><div class="stat-label">Angle</div><div class="stat-value" id="stat-angle">—</div></div>
-              <div class="stat-box"><div class="stat-label">Cut</div><div class="stat-value" id="stat-cut">—</div></div>
-              <div class="stat-box"><div class="stat-label">Peak</div><div class="stat-value" id="stat-peak">—</div></div>
-              <div class="stat-box"><div class="stat-label">Progress</div><div class="stat-value" id="stat-progress">0/0</div></div>
+      <!-- Graph panel (tabs) -->
+      <section class="graph-panel glass-panel flex-grow">
+        <div class="header-with-tabs">
+          <div class="header-left">
+            <span class="app-wordmark">CHAMBER</span>
+            <div class="tab-list">
+              <button class="tab-btn active" data-target="tab-pattern">Pattern Measurement</button>
+              <button class="tab-btn" data-target="tab-vna">VNA</button>
+              <button class="tab-btn" data-target="tab-turntable">Turntable</button>
+              <button class="tab-btn" data-target="tab-logs">Logs</button>
             </div>
           </div>
-          <div class="progress-track"><div class="progress-fill" id="progress"></div></div>
-          <div class="chart-wrapper" style="margin-top:0.5rem;">
+          <div class="header-actions">
+            <span class="status-pill mock" id="pill-mock" hidden>MOCK</span>
+            <span class="status-pill" id="pill-phase">idle</span>
+            <button class="btn btn-danger btn-small" id="btn-abort" disabled>Abort</button>
+            <button class="btn btn-primary btn-small" id="btn-start">Start scan</button>
+          </div>
+        </div>
+
+        <div class="progress-track"><div class="progress-fill" id="progress"></div></div>
+
+        <div class="plots-stack">
+
+          <div class="chart-wrapper tab-content active" id="tab-pattern">
             <canvas id="polar"></canvas>
+            <div class="plot-legend" id="pattern-legend">
+              <span class="legend-item"><i class="swatch live"></i>measured</span>
+              <span class="legend-item ref" hidden><i class="swatch ref"></i><span id="legend-ref-label">reference</span></span>
+            </div>
           </div>
-        </section>
 
-        <section class="glass-panel graph-panel" style="flex:0 0 190px;">
-          <div class="panel-header-row">
-            <h3 style="font-size:0.86rem; font-weight:600;">Spectrum at current angle</h3>
-            <span class="status-pill" id="pill-span">—</span>
+          <div class="chart-wrapper tab-content" id="tab-vna">
+            <div class="tab-pane">
+              <div class="pane-header">
+                <h3>Spectrum at current angle</h3>
+                <span class="status-pill" id="pill-span">—</span>
+              </div>
+              <div class="pane-body"><canvas id="spectrum"></canvas></div>
+              <div class="chart-stats compact-stats">
+                <div class="stat-box compact"><span class="stat-label">Parameter</span><span class="stat-value" id="stat-param">—</span></div>
+                <div class="stat-box compact"><span class="stat-label">Points</span><span class="stat-value" id="stat-points">—</span></div>
+                <div class="stat-box compact"><span class="stat-label">Cut freq</span><span class="stat-value" id="stat-cutfreq">—</span></div>
+                <div class="stat-box compact"><span class="stat-label">Cut level</span><span class="stat-value" id="stat-cut2">—</span></div>
+              </div>
+            </div>
           </div>
-          <div class="chart-wrapper"><canvas id="spectrum"></canvas></div>
-        </section>
-      </div>
+
+          <div class="chart-wrapper tab-content" id="tab-turntable">
+            <div class="tab-pane">
+              <div class="pane-header">
+                <h3>Axis position</h3>
+                <span class="status-pill" id="pill-motion">stopped</span>
+              </div>
+              <div class="pane-body dial-body">
+                <canvas id="dial"></canvas>
+                <div class="dial-readout">
+                  <div class="stat-box"><span class="stat-label">Commanded</span><span class="stat-value" id="stat-cmd">—</span></div>
+                  <div class="stat-box"><span class="stat-label">Actual</span><span class="stat-value" id="stat-actual">—</span></div>
+                  <div class="stat-box"><span class="stat-label">Error</span><span class="stat-value" id="stat-err">—</span></div>
+                  <div class="stat-box"><span class="stat-label">Grid</span><span class="stat-value" id="stat-grid">—</span></div>
+                  <div class="stat-box"><span class="stat-label">Remaining</span><span class="stat-value" id="stat-remaining">—</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="chart-wrapper tab-content" id="tab-logs">
+            <div class="logs-pane">
+              <div class="logs-toolbar">
+                <span class="logs-title">Runtime log</span>
+                <button class="btn btn-outline btn-small" id="btn-clear-log">Clear</button>
+              </div>
+              <div class="log-console" id="log" aria-live="polite"></div>
+            </div>
+          </div>
+
+        </div>
+
+        <div class="chart-stats">
+          <div class="stat-box compact"><span class="stat-label">Angle</span><span class="stat-value" id="stat-angle">—</span></div>
+          <div class="stat-box compact"><span class="stat-label">Cut</span><span class="stat-value" id="stat-cut">—</span></div>
+          <div class="stat-box compact"><span class="stat-label">Peak</span><span class="stat-value" id="stat-peak">—</span></div>
+          <div class="stat-box compact"><span class="stat-label">Progress</span><span class="stat-value" id="stat-progress">0/0</span></div>
+          <div class="stat-box compact" id="stat-box-delta" hidden><span class="stat-label">Δ ref</span><span class="stat-value" id="stat-delta">—</span></div>
+          <div class="stats-spacer"></div>
+          <span class="subtitle" id="subtitle">antenna pattern acquisition</span>
+          <div class="status-indicator">
+            <div class="dot disconnected" id="dot-link"></div>
+            <span id="state-text">offline</span>
+          </div>
+        </div>
+      </section>
     </main>
-
-    <section class="glass-panel logs-pane">
-      <div class="logs-toolbar">
-        <div class="panel-title" style="margin:0;">Log</div>
-        <button class="btn btn-small" id="btn-clear-log">Clear</button>
-      </div>
-      <div class="log-console" id="log"></div>
-    </section>
   </div>
 
   <script type="module" src="/src/main.js"></script>
