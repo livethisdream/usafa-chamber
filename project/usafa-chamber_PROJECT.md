@@ -46,6 +46,17 @@ zero-filled), and a normalized polar `pattern.png` at the requested cut frequenc
 - **2026-08-20** — `angles()` floors instead of rounding. Reason: rounding let a
   non-divisible step overshoot the requested stop angle (`0→355 step 7` commanded
   357°), which on a limit-configured turntable is a move outside the intended range.
+- **2026-08-20** — Positioner serial framing is **115200 8N1** on the EMCenter USB
+  port. Reason: probed it directly; 9600 in both 7O1 and 8N1 times out. The
+  9600,7,Odd,1 in ETS-Lindgren's documentation describes the legacy
+  Holaday-compatible rear port, not the USB virtual COM port.
+- **2026-08-20** — Positioner writes drain their reply and queries raise on an
+  `ERROR n` response. Reason: the chassis answers *every* command including bad
+  ones. A write that left its error line unread desynchronized the stream, so
+  each later query returned the previous command's error as if it were data.
+- **2026-08-20** — Speed is left alone by default (`--speed` to override).
+  Reason: the real mnemonic is `SPEED <percent>`, not `SP <preset>`; the old
+  default would have pushed a preset index into a percentage field.
 - **2026-08-20** — Repo hosted under OneDrive at `USAFA/usafa-chamber` (sibling to
   `USAFA/ece444`), mounted into cdocker, remote `livethisdream/usafa-chamber`.
 
@@ -63,45 +74,51 @@ running, the acquisition path cannot be exercised against hardware.
 
 # Status
 
-Code is fixed and the offline half is verified; hardware is not yet reachable.
+**Positioner: talking, verified, read-only tested.** **VNA: still no link.**
 
-**Verified working (2026-08-20)**, via a stubbed-instrument harness under Python 3.12 / numpy 2.5.2:
-- `angles()` no longer overshoots the stop angle and no longer double-measures 0°/360°.
-- `measure()` raises on a point-count mismatch instead of letting `zip` silently truncate rows.
-- `seek()` parks correctly even when the card is ~1 s late to report motion, and raises
-  when the tower never moves at all.
-- `_write_s2p` emits correct 9-column RI 2-port Touchstone (S11/S21/S12/S22 ordering).
-- `polar_plot` renders; `np.fromstring(sep=",")` confirmed *not* deprecated on numpy 2.5.2.
-- `pattern_measure.py --help` runs against real `pyvisa` 1.16.2 in `.venv-win`.
+Rig identity, read off the hardware 2026-08-20:
+- Chassis — `ETS Lindgren EMCenter version 4.6.0`
+- Slot 1, device A — `ETS-Lindgren, EMControl 7006-001, 2.10.3`
+- Slot 1B → `ERROR 305` (no second device); slot 2 answers a *different* error
+  (`Error 23`) so some other card is present; slots 3–8 → `ERROR 21` (empty)
+- Turntable parked at **90.0°**, speed **100.0%**, `ACC?` 2.0, `ERR?` 0
 
-**Hardware blockers (2026-08-20):**
-- **EMCenter positioner** — chassis is plugged in and enumerates
-  (`USB\VID_0403&PID_8570`, `BusReportedDeviceDesc: EMCenter 7000-series`, parent
-  driver healthy). Its virtual COM port child
-  (`FTDIBUS\VID_0403+PID_8570+00AUG2EEA\0000`) fails with **problem code 28**
-  (`CM_PROB_FAILED_INSTALL`), `ConfigFlags 64`, and no `PortName` in the registry.
-  `ftdibus.sys` and `ftser2k.sys` are both present, so this is the ETS-Lindgren `.inf`
-  binding the custom PID `8570` to the VCP driver not being installed — stock FTDI
-  drivers only claim standard PIDs. **There is no COM port to open.**
-- **VNA** — absent. No Copper Mountain software in Program Files, nothing listening on
-  TCP 5025. The A2202-Fx needs S2VNA running on this host to expose the SCPI socket.
-- **VISA backend** — no `visa64.dll` at the IVI Foundation path. Keysight and NI trees
-  exist under Program Files but the IVI shared component is not where `pyvisa` looks.
-  `pyvisa-py` is available as the `sim` extra as a fallback.
-- The config default `192.168.1.50` for the positioner is not on any subnet this
-  machine has (`10.192.93.x`, `172.25.144.x` WSL, link-local) — it is a placeholder,
-  not the real address.
+`Positioner` now round-trips against real hardware: `identity()`, `position()`,
+`speed()`, `latched_error()`, `in_motion()` all correct, a bogus query raises
+`RuntimeError`, and the stream stays in sync afterwards. **Nothing has been
+commanded to move.**
+
+Five acquisition bugs fixed earlier (motion-start race, angle overshoot,
+duplicate 360°, silent row truncation, unchecked sweep errors) plus five driver
+bugs the hardware exposed — see Decisions. Dual venvs and packaging in place;
+`pyvisa-py` + `pyserial` supply the serial backend via the `sim` extra.
+
+**Remaining blocker — S2VNA socket server is off.** The A2202-Fx itself is fine:
+it enumerates as `USB\VID_36BF&PID_1413` under device class `USBDevice`, which is
+why it shows up in Device Manager under *Universal Serial Bus devices* rather
+than Ports or anything VNA-named. S2VNA is installed at `C:\VNA\S2VNA\S2VNA.exe`
+(outside Program Files) and runs, but holds **no listening TCP port at all**. The
+socket server is a GUI toggle — *System → Misc Setup → Network Setup → Socket
+Server* — and is not exposed in any config file on disk.
+
+Also unresolved: there is no over-the-wire way to read the turntable's software
+limits or continuous/non-continuous mode on this firmware, so the cable-wrap
+configuration has to be confirmed on the EMControl front panel before a scan.
 
 # ToDo
 
-- [ ] Install the ETS-Lindgren EMCenter USB/VCP driver package to clear problem code 28
-      and get a COM port assigned.
-- [ ] Point `PositionerConfig.resource` at the resulting `ASRL<n>::INSTR` (9600,7,Odd,1
-      on the Holaday-compatible port) instead of the placeholder TCPIP address.
-- [ ] Install / launch S2VNA and confirm the socket server is listening on 5025.
-- [ ] Resolve the VISA backend — either install IVI shared components or pin
-      `pyvisa-py` via the `sim` extra.
-- [ ] Cross-check `PositionerCmds` mnemonics against ETS-Lindgren manual 399342.
-- [ ] Full dry run in EMControl simulation mode before commanding real motion.
-- [ ] Confirm turntable continuous / non-continuous mode and the cable path.
-- [ ] Add sweep averaging and a `--speed` CLI flag.
+- [ ] Enable the S2VNA socket server (System → Misc Setup → Network Setup) and
+      confirm something listens on 5025.
+- [ ] Read the VNA banner over the socket to verify the SCPI mnemonics in `Vna`
+      the same way the positioner's were verified.
+- [ ] Confirm turntable continuous / non-continuous mode and the cable path on
+      the EMControl front panel — not readable over the wire.
+- [ ] First commanded motion: small bounded move (90° → 95° → 90°) to validate
+      `seek()` arrival detection against real mechanics.
+- [ ] Full dry run in EMControl simulation mode.
+- [ ] First real cut on a reference antenna to sanity-check pattern shape.
+- [ ] Add sweep averaging; consider wiring `ACC?`/acceleration into the config.
+- [x] ~~Install the ETS-Lindgren EMCenter USB/VCP driver~~ — done, now COM16.
+- [x] ~~Point `PositionerConfig.resource` at the real port~~ — `ASRL16::INSTR`.
+- [x] ~~Cross-check `PositionerCmds` mnemonics~~ — probed directly against the card.
+- [x] ~~Resolve the VISA backend~~ — `pyvisa-py` via the `sim` extra.
