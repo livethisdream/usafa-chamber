@@ -6,6 +6,29 @@ Antenna pattern measurement for the USAFA anechoic chamber.
 - **Positioner** — ETS-Lindgren EMControl 7006-001, **slot 1 device A**, in an EMCenter chassis,
   over its FTDI virtual COM port at **115200 8N1**
 
+## First-time setup
+
+```powershell
+.\setup.ps1
+```
+
+```bash
+./setup.sh          # WSL / Linux
+```
+
+Creates the out-of-tree venv and its junction/symlink, installs Python and frontend
+dependencies, and — on Windows — reports whether the rig is actually ready. It never
+downloads or installs drivers for you; where something is missing it names the fault
+and where to get the fix.
+
+`.\setup.ps1 -CheckOnly` diagnoses without changing anything, which is safe to run on
+the acquisition PC mid-session. Both scripts are idempotent.
+
+The readiness checks distinguish three states that look identical in Device Manager
+and are easy to misdiagnose: hardware never connected, hardware installed but
+currently unplugged, and hardware connected with a driver that failed to install.
+Only the last one calls for reinstalling anything.
+
 ## Working away from the chamber
 
 Everything below runs with no instruments attached.
