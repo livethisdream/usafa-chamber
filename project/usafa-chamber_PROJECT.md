@@ -33,6 +33,26 @@ zero-filled), and a normalized polar `pattern.png` at the requested cut frequenc
 - Venvs live outside the tree (`.venv-win` / `.venv-linux` junctions) because this
   project sits under OneDrive, which otherwise syncs venv contents.
 
+# Traps
+
+- **Windows keeps a device node for hardware it has ever seen.** A ghost reports
+  `Present=False`, `Status=Unknown` and an empty problem code — indistinguishable
+  from a failed driver install unless you check `Present` first. Cost: `setup.ps1`
+  initially prescribed a driver reinstall for an unplugged chassis.
+- **Device Emulation is not simulation.** The EMControl front-panel toggle is
+  legacy-protocol compatibility; it does not inhibit the motor, and no read-only
+  query distinguishes "simulating" from "ready to move".
+- **`--dry-run` means no VNA, not no motion.** It issues real seek commands and
+  will turn the tower unless EMControl is genuinely in simulation mode.
+- **S2VNA's socket server is off by default** and is a GUI-only toggle
+  (System → Misc Setup → Network Setup). Nothing listens on 5025 until it is on,
+  and it keeps listening after the VNA is unplugged.
+- **Neither instrument is where you would look for it.** S2VNA installs to
+  `C:\VNA\`, not Program Files; the A2202-Fx enumerates under device class
+  `USBDevice`, so Device Manager files it under *Universal Serial Bus devices*.
+- **`grep` block-buffers when not writing to a terminal.** Piping a long-running
+  script through it makes a live run look like it produced nothing.
+
 # Decisions
 
 - **2026-08-20** — Positioner arrival is confirmed by position readback, never by
@@ -50,10 +70,6 @@ zero-filled), and a normalized polar `pattern.png` at the requested cut frequenc
   port. Reason: probed it directly; 9600 in both 7O1 and 8N1 times out. The
   9600,7,Odd,1 in ETS-Lindgren's documentation describes the legacy
   Holaday-compatible rear port, not the USB virtual COM port.
-- **2026-08-20** — Positioner writes drain their reply and queries raise on an
-  `ERROR n` response. Reason: the chassis answers *every* command including bad
-  ones. A write that left its error line unread desynchronized the stream, so
-  each later query returned the previous command's error as if it were data.
 - **2026-08-20** — Speed is left alone by default (`--speed` to override).
   Reason: the real mnemonic is `SPEED <percent>`, not `SP <preset>`; the old
   default would have pushed a preset index into a percentage field.
@@ -62,14 +78,13 @@ zero-filled), and a normalized polar `pattern.png` at the requested cut frequenc
   "Command header error" and then never replies, so the unguarded call blocked
   for the full 120 s instrument timeout. It only ever fed a progress estimate,
   so it now uses a 3 s timeout and returns None.
-- **2026-08-20** — `--dry-run` suppresses the VNA, not motion. Reason: the name
-  invites the opposite reading, and the flag issues real seek commands. Spelled
-  out in the help text.
-- **2026-08-20** — Positioner commands retry once after a resync, and position
-  replies are validated against the full `<number> DEGREES` format. Reason: the
+- **2026-08-20** — Positioner writes drain their reply, commands retry once after
+  a resync, and position replies are validated against the full
+  `<number> DEGREES` format. Reason: the chassis answers *every* command, and the
   FTDI link corrupts bytes at a measurable rate. Outgoing corruption produces
   `ERROR 1` (loud); incoming corruption splits a reply so the fragment still
-  parses as a plausible angle (silent, and therefore worse).
+  parses as a plausible angle (silent, and therefore worse). Retries are safe
+  because every write is an idempotent absolute instruction.
 - **2026-08-20** — Dashboard mirrors the Phaser architecture: WebSocket service
   with a JSON `{cmd, id}` protocol, a transport facade on the frontend, and a
   simulated backend preserving the payload contract. Reason: it is a proven
@@ -79,13 +94,15 @@ zero-filled), and a normalized polar `pattern.png` at the requested cut frequenc
   instruments are single-threaded and stateful; a competing write would land in
   the middle of another thread's request/response exchange. Serial access stays
   single-threaded and stop still responds in ~100 ms via `seek(should_abort=)`.
-- **2026-08-20** — Repo hosted under OneDrive at `USAFA/usafa-chamber` (sibling to
-  `USAFA/ece444`), mounted into cdocker, remote `livethisdream/usafa-chamber`.
+- **2026-08-20** — Setup scripts detect and instruct; they never download or
+  install. Reason: driver installs need admin rights on an ADI-managed machine
+  and should be a deliberate act, not a side effect of running setup.
 
 # Plan
 
-**Phase 1 (done): service, simulator, transport.** `chamber_service.py` plus the
-Vite frontend, verified against both backends. See `README.md` to run either.
+✅ **Phase 1 — service, simulator, transport.** `chamber_service.py` plus the Vite
+frontend, verified against both backends. Setup scripts (`setup.ps1`, `setup.sh`)
+make the environment reproducible. See `README.md` to run either.
 
 **Later:**
 - Phase 2 — polish the hardware path in the UI: richer status, jog affordances,
@@ -98,53 +115,51 @@ Vite frontend, verified against both backends. See `README.md` to run either.
 
 # Status
 
-**Full acquisition chain verified on hardware, and dashboard phase 1 is complete.**
+Acquisition chain verified end to end on hardware; dashboard phase 1 done. `main`
+is pushed to `livethisdream/usafa-chamber` and the tree is clean. See the archive
+for the bring-up history.
 
-Rig — VNA `CMT, A2202-Fx, 26018474, 26.3.1/1`; chassis `EMCenter 4.6.0`; slot 1A
-`EMControl 7006-001, 2.10.3`. Motion confirmed visually more than once
-(90°→150°→90° at 40% speed, ~6.7 deg/s, exact arrivals, no latched errors).
+**Rig identity** — VNA `CMT, A2202-Fx, 26018474, 26.3.1/1`; chassis
+`EMCenter 4.6.0`; slot 1A `EMControl 7006-001, 2.10.3` on COM16 at 115200 8N1.
+All three devices are currently **unplugged** (`Present=False`); S2VNA is still
+running and still holds 5025.
 
-**Thru-line reference (`thru_run/`), 72 angles × 101 freqs, 2–3 GHz:** S21 flat to
-**0.019 dB peak-to-peak across the full rotation** (σ 0.0029 dB), mean −0.88 dB.
-The polar plot is a clean circle — the correct answer for a thru, and a strong
-stability figure for the whole chain. Anything above ~0.03 dB of angular
-structure in a real measurement is therefore signal, not instrumentation.
+**Reference figure worth keeping:** the thru-line run (`thru_run/`, 72 × 101,
+2–3 GHz) is flat to **0.019 dB peak-to-peak across the full rotation**
+(σ 0.0029 dB, mean −0.88 dB). That is the noise floor of the whole chain — above
+roughly 0.03 dB of angular structure, a real measurement is showing signal.
 
-**Dashboard phase 1 (`chamber_service.py` + `frontend/`).** Verified against the
-simulator: every command, unknown-command rejection, live push frames,
-concurrent-scan refusal, mid-scan jog refusal, STOP preempting a running scan,
-run persistence and reload, and polar trace closure on a full rotation versus
-staying open on a partial arc. `HardwareBackend` separately verified read-only
-against the real rig — identity, `configure()` from a `ScanRequest` (51 pts over
-exactly 2.4–2.6 GHz), `measure()`, and `get_state()` reporting `mode: hw`.
+**Working state.** `pattern_measure.py` is the standalone acquisition path;
+`chamber_service.py` + `frontend/` is the dashboard, runnable with no hardware via
+`--sim`. Both backends verified, including STOP preempting a live scan.
+`HardwareBackend` verified read-only against the rig.
 
-**Link quality remains the open hardware concern.** One 72-point run logged 3
-`ERROR 1` retries and 2 corrupted position reads, ~7% of exchanges; a later
-rotation test logged none. Both failure modes are handled in software now, but
-the physical cause is unaddressed — cable, hub, or RF pickup are the candidates.
-
-Twelve bugs fixed: five from code review, five that only hardware contact could
-expose, the unsupported `SENS:SWE:TIME?`, and the split-reply position bug.
-
-**Note — a parallel implementation exists on the remote.** `livethisdream/usafa-chamber`
-carries a branch `claude/vna-antenna-controller-vaa34u` (7 commits) with a different
-build of this same project: a modular `acquisition/` package (`engine.py`,
-`instruments.py`, `mock_instruments.py`, `writers.py`), its own `service/`, and its
-own Vite frontend using the same transport split. It was written against mock
-instruments, not the rig. The two histories share no common ancestor, so they cannot
-be merged cleanly. Its `project/USAFA-chamber_PROJECT.md` differs from this file only
-by capitalization, which would collide on a case-insensitive filesystem. `main` is
-pushed alongside it; reconciling the two is an open decision.
-
-**Instrument state left behind:** the VNA is on 2–3 GHz / 101 pts / S21 from the
-reference scan, not the 100 kHz–22 GHz S11 sweep it held at session start.
+**Open concerns:**
+- *FTDI link corruption.* One 72-point run logged 3 `ERROR 1` retries and 2 split
+  position reads (~7% of exchanges); a later rotation test logged none. Handled in
+  software; the physical cause — cable, hub, or RF pickup — is unaddressed.
+- *Parallel implementation on the remote.* Branch
+  `claude/vna-antenna-controller-vaa34u` (7 commits) is a different build of this
+  same project, written against mock instruments. Unrelated histories, so no clean
+  merge; its `project/USAFA-chamber_PROJECT.md` differs from this file only by
+  case, which collides on Windows. Its `acquisition/` package is more modular than
+  `main` and may hold structure worth lifting.
+- *Setup scripts are untested on a fresh machine* — the environment half only ever
+  exercised the reuse path, and the hardware half has never seen a healthy
+  connected rig or a genuine problem-code-28 device.
+- *VNA left on 2–3 GHz / 101 pts / S21*, not its original 100 kHz–22 GHz S11 sweep.
 
 # ToDo
 
+- [ ] Fix the stale line in **Special Instructions** claiming the EMCenter
+      mnemonics are unverified — they were probed directly against the card and
+      are recorded in `PositionerCmds`. (Section is read-only to `/bye`.)
 - [ ] Decide how to reconcile `claude/vna-antenna-controller-vaa34u` with `main`
       — unrelated histories, overlapping scope, one file differing only in case.
 - [ ] Chase the FTDI link corruption physically — different cable, no hub, check
       routing relative to the VNA and chamber feed.
+- [ ] Exercise `setup.ps1` on a fresh machine and against a connected rig; the
+      problem-code-28 branch has never run against a real failed install.
 - [ ] Phase 2: hardware-path polish in the UI; surface link-retry warnings to the
       operator instead of only stderr.
 - [ ] Phase 3: run browser — list/load stored runs, overlay cuts, export.
@@ -154,11 +169,3 @@ reference scan, not the 100 kHz–22 GHz S11 sweep it held at session start.
 - [ ] Switch Device Emulation back off — unused, and an uncharacterized variable.
 - [ ] Restore the VNA to its original sweep setup, or set it up fresh next visit.
 - [ ] First real cut on a reference antenna; add sweep averaging.
-- [x] ~~Install the EMCenter USB/VCP driver~~ — done, COM16.
-- [x] ~~Cross-check `PositionerCmds` mnemonics~~ — probed against the card.
-- [x] ~~Enable the S2VNA socket server~~ — listening on 5025.
-- [x] ~~Verify the VNA SCPI path~~ — configure/frequencies/measure exercised.
-- [x] ~~Validate `seek()` against real mechanics~~ — visually confirmed.
-- [x] ~~First full collection run~~ — 72-point thru reference.
-- [x] ~~Dashboard phase 1~~ — service, sim backend, transport, frontend.
-- [x] ~~Verify `HardwareBackend` against the real rig~~ — read-only check passed.
