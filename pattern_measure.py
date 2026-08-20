@@ -269,25 +269,58 @@ class Positioner:
                               "odd": _pc.Parity.odd,
                               "even": _pc.Parity.even}[cfg.parity]
 
-    def _w(self, body: str) -> None:
-        """Write, then drain any reply. The EMCenter answers malformed or
-        unsupported commands with an 'ERROR n' line. A write that leaves that
-        line unread desynchronizes every later query, which then reads the
-        previous command's error instead of its own answer."""
+    def _flush_input(self) -> None:
+        """Discard anything sitting unread, to resynchronize the reply stream."""
+        saved, self.io.timeout = self.io.timeout, 50
+        try:
+            while True:
+                try:
+                    self.io.read()
+                except pyvisa.VisaIOError:
+                    break
+        finally:
+            self.io.timeout = saved
+
+    def _w(self, body: str, _retry: bool = True) -> None:
+        """Write and check the acknowledgement.
+
+        The card answers a good command with 'OK' and a malformed one with
+        'ERROR n'. Leaving either unread desynchronizes every later query,
+        which then reads the previous command's answer instead of its own.
+
+        An ERROR here is occasionally a corrupted byte on the FTDI link rather
+        than a genuinely bad command - observed once mid-scan on a 'SK' that
+        was provably valid. Aborting a multi-minute scan over one bad byte is
+        the wrong trade, so a rejection is retried once after resynchronizing.
+        Every command sent through here is an idempotent absolute instruction
+        (seek to an angle, define the current angle, stop), so re-sending is
+        safe by construction. The retry warns rather than staying silent, so a
+        link that is genuinely degrading still shows up in the log.
+        """
         self.io.write(self.cmds.prefix + body)
         saved, self.io.timeout = self.io.timeout, self.cfg.drain_timeout_ms
         try:
             reply = self.io.read().strip()
         except pyvisa.VisaIOError:
-            reply = ""              # silence is the success case
+            reply = ""              # silence is an acceptable success case
         finally:
             self.io.timeout = saved
         if reply and reply.upper().startswith("ERROR"):
+            if _retry:
+                print(f"[pos] {body!r} -> {reply}; resyncing and retrying once",
+                      file=sys.stderr)
+                self._flush_input()
+                return self._w(body, _retry=False)
             raise RuntimeError(f"positioner rejected {body!r}: {reply}")
 
-    def _q(self, body: str) -> str:
+    def _q(self, body: str, _retry: bool = True) -> str:
         reply = self.io.query(self.cmds.prefix + body).strip()
         if reply.upper().startswith("ERROR"):
+            if _retry:
+                print(f"[pos] {body!r} -> {reply}; resyncing and retrying once",
+                      file=sys.stderr)
+                self._flush_input()
+                return self._q(body, _retry=False)
             raise RuntimeError(f"positioner rejected {body!r}: {reply}")
         return reply
 
