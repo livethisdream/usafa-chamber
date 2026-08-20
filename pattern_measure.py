@@ -19,7 +19,9 @@ VERIFY BEFORE FIRST RUN
     Continuous ignores software limits and will happily wind up your RF cable
     if there is no rotary joint.
   * Run once with the EMControl simulation mode ON (Config screen) to shake out
-    the state machine with nothing physically moving.
+    the state machine with nothing physically moving:
+        pattern_measure.py --dry-run --step 5
+    That steps every angle and writes dryrun.csv without opening the VNA.
 """
 
 from __future__ import annotations
@@ -170,8 +172,27 @@ class Vna:
         self.io.write("FORM:DATA ASC")
         self._check_errors("after configure")
 
-    def sweep_time_s(self) -> float:
-        return float(self.io.query(f"SENS{self.ch}:SWE:TIME?"))
+    def sweep_time_s(self) -> float | None:
+        """Sweep time in seconds, or None when the firmware has no such query.
+
+        Not universally supported: the A2202-Fx (firmware 26.3.1) answers
+        SENS:SWE:TIME? with -110 'Command header error' and then never replies,
+        so an unguarded call blocks for the full instrument timeout - 120 s by
+        default - before raising. Queried with a short timeout and treated as
+        an optional nicety; it only feeds a progress estimate.
+        """
+        saved, self.io.timeout = self.io.timeout, 3_000
+        try:
+            return float(self.io.query(f"SENS{self.ch}:SWE:TIME?"))
+        except (pyvisa.VisaIOError, ValueError):
+            return None
+        finally:
+            self.io.timeout = saved
+            # Clear the latched -110 so it is not misreported later.
+            try:
+                self.io.query("SYST:ERR?")
+            except pyvisa.VisaIOError:
+                pass
 
     def frequencies(self) -> np.ndarray:
         raw = self.io.query(f"SENS{self.ch}:FREQ:DATA?")
@@ -372,6 +393,45 @@ def run_scan(vna: Vna, pos: Positioner, scan: ScanConfig):
     return angles, actual, freqs, data
 
 
+def run_positioner_only(pos: Positioner, scan: ScanConfig):
+    """Step the full angle list without touching the VNA.
+
+    This is the run to make against EMControl's simulation mode: it exercises
+    seek(), motion-start detection, arrival tolerance and the settle path -
+    everything that can silently corrupt a real scan - with no VNA in the loop
+    and, in simulation, nothing physically turning.
+
+    Writes dryrun.csv (commanded vs. read-back angle and the per-step wall
+    time) so positioner accuracy and slew timing can be inspected afterwards.
+    """
+    scan.outdir.mkdir(parents=True, exist_ok=True)
+    angles = scan.angles()
+    csv_path = scan.outdir / "dryrun.csv"
+    worst = 0.0
+    t_start = time.monotonic()
+
+    with csv_path.open("w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["angle_cmd_deg", "angle_actual_deg", "error_deg", "step_s"])
+        for ang in angles:
+            t0 = time.monotonic()
+            actual = pos.seek(float(ang))
+            dt = time.monotonic() - t0
+            err = _wrap180(actual - float(ang))
+            worst = max(worst, abs(err))
+            w.writerow([f"{ang:.2f}", f"{actual:.2f}", f"{err:+.3f}", f"{dt:.3f}"])
+            fh.flush()
+            print(f"  {ang:7.2f} deg -> read {actual:7.2f}  "
+                  f"err {err:+6.3f}  {dt:5.2f} s", flush=True)
+
+    total = time.monotonic() - t_start
+    print(f"\nwrote {csv_path}")
+    print(f"{len(angles)} points in {total/60:.1f} min, "
+          f"worst position error {worst:.3f} deg")
+    print(f"latched positioner error: {pos.latched_error()}")
+    return angles
+
+
 def _write_s2p(path: Path, freqs: np.ndarray, s21: np.ndarray) -> None:
     """Minimal Touchstone. Only S21 is populated; the rest are zero-filled."""
     with path.open("w") as fh:
@@ -443,6 +503,11 @@ def main(argv=None) -> int:
     p.add_argument("--s2p", action="store_true", help="also write per-angle Touchstone")
     p.add_argument("--zero-here", action="store_true",
                    help="define the current mechanical position as 0 deg, then scan")
+    p.add_argument("--dry-run", action="store_true",
+                   help="step the positioner through every angle without the VNA; "
+                        "use this against EMControl simulation mode")
+    p.add_argument("--visa", default="",
+                   help="VISA backend, e.g. '@py' for pyvisa-py (default: let pyvisa choose)")
     p.add_argument("--outdir", type=Path, default=Path("./pattern_run"))
     a = p.parse_args(argv)
 
@@ -455,14 +520,21 @@ def main(argv=None) -> int:
                       cut_freq_hz=(a.cut_ghz * 1e9 if a.cut_ghz else None),
                       write_s2p=a.s2p, outdir=a.outdir)
 
-    rm = pyvisa.ResourceManager()
+    rm = pyvisa.ResourceManager(a.visa) if a.visa else pyvisa.ResourceManager()
     vna = pos = None
     try:
-        vna = Vna(rm, vcfg)
-        print(f"VNA : {vna.idn()}")
-        vna.configure()
-        print(f"      {vcfg.points} pts, {vcfg.start_hz/1e9:.3f}-{vcfg.stop_hz/1e9:.3f} GHz, "
-              f"IFBW {vcfg.if_bw_hz:.0f} Hz, sweep {vna.sweep_time_s()*1e3:.1f} ms")
+        sweep_s = 0.0
+        if a.dry_run:
+            print("DRY RUN: positioner only, VNA not opened.")
+        else:
+            vna = Vna(rm, vcfg)
+            print(f"VNA : {vna.idn()}")
+            vna.configure()
+            sweep_s = vna.sweep_time_s()
+            sweep_txt = f"sweep {sweep_s*1e3:.1f} ms" if sweep_s else "sweep time n/a"
+            print(f"      {vcfg.points} pts, {vcfg.start_hz/1e9:.3f}-{vcfg.stop_hz/1e9:.3f} GHz, "
+                  f"IFBW {vcfg.if_bw_hz:.0f} Hz, {sweep_txt}")
+            sweep_s = sweep_s or 0.0
 
         pos = Positioner(rm, pcfg, cmds)
         if pcfg.speed_percent is not None:
@@ -475,11 +547,15 @@ def main(argv=None) -> int:
               f"err {pos.latched_error()}")
 
         n = len(scan.angles())
-        est = n * (vna.sweep_time_s() + pcfg.settle_s + scan.step_deg * 0.2)
-        print(f"\nscanning {n} points, rough estimate {est/60:.1f} min\n")
+        est = n * (sweep_s + pcfg.settle_s + scan.step_deg * 0.2)
+        print(f"\n{'stepping' if a.dry_run else 'scanning'} {n} points, "
+              f"rough estimate {est/60:.1f} min\n")
 
-        angles, actual, freqs, data = run_scan(vna, pos, scan)
-        polar_plot(angles, freqs, data, scan)
+        if a.dry_run:
+            run_positioner_only(pos, scan)
+        else:
+            angles, actual, freqs, data = run_scan(vna, pos, scan)
+            polar_plot(angles, freqs, data, scan)
 
         if scan.return_home:
             print("returning to start position...")
