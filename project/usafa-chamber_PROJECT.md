@@ -126,11 +126,23 @@ the physical cause is unaddressed — cable, hub, or RF pickup are the candidate
 Twelve bugs fixed: five from code review, five that only hardware contact could
 expose, the unsupported `SENS:SWE:TIME?`, and the split-reply position bug.
 
+**Note — a parallel implementation exists on the remote.** `livethisdream/usafa-chamber`
+carries a branch `claude/vna-antenna-controller-vaa34u` (7 commits) with a different
+build of this same project: a modular `acquisition/` package (`engine.py`,
+`instruments.py`, `mock_instruments.py`, `writers.py`), its own `service/`, and its
+own Vite frontend using the same transport split. It was written against mock
+instruments, not the rig. The two histories share no common ancestor, so they cannot
+be merged cleanly. Its `project/USAFA-chamber_PROJECT.md` differs from this file only
+by capitalization, which would collide on a case-insensitive filesystem. `main` is
+pushed alongside it; reconciling the two is an open decision.
+
 **Instrument state left behind:** the VNA is on 2–3 GHz / 101 pts / S21 from the
 reference scan, not the 100 kHz–22 GHz S11 sweep it held at session start.
 
 # ToDo
 
+- [ ] Decide how to reconcile `claude/vna-antenna-controller-vaa34u` with `main`
+      — unrelated histories, overlapping scope, one file differing only in case.
 - [ ] Chase the FTDI link corruption physically — different cable, no hub, check
       routing relative to the VNA and chamber feed.
 - [ ] Phase 2: hardware-path polish in the UI; surface link-retry warnings to the
