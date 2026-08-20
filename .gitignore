@@ -11,6 +11,9 @@ __pycache__/
 # Measurement run outputs - commit a run deliberately if it is worth keeping
 pattern_run/
 *_run/
+# thru_run is the system-stability baseline the README and project note cite,
+# so it travels with the repo rather than living only on the acquisition PC.
+!thru_run/
 node_modules/
 frontend/dist/
 runs/
