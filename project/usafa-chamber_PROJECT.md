@@ -65,6 +65,11 @@ zero-filled), and a normalized polar `pattern.png` at the requested cut frequenc
 - **2026-08-20** — `--dry-run` suppresses the VNA, not motion. Reason: the name
   invites the opposite reading, and the flag issues real seek commands. Spelled
   out in the help text.
+- **2026-08-20** — Positioner commands retry once after a resync, and position
+  replies are validated against the full `<number> DEGREES` format. Reason: the
+  FTDI link corrupts bytes at a measurable rate. Outgoing corruption produces
+  `ERROR 1` (loud); incoming corruption splits a reply so the fragment still
+  parses as a plausible angle (silent, and therefore worse).
 - **2026-08-20** — Repo hosted under OneDrive at `USAFA/usafa-chamber` (sibling to
   `USAFA/ece444`), mounted into cdocker, remote `livethisdream/usafa-chamber`.
 
@@ -82,59 +87,47 @@ running, the acquisition path cannot be exercised against hardware.
 
 # Status
 
-**Both instruments verified against real hardware. Only the motion path is untested.**
+**Full chain verified end to end on hardware, including a completed 72-point scan.**
 
-Rig identity, read off the hardware 2026-08-20:
-- VNA — `CMT, A2202-Fx, 26018474, 26.3.1/1`, via the S2VNA socket server on 5025
+Rig, read off the hardware 2026-08-20:
+- VNA — `CMT, A2202-Fx, 26018474, 26.3.1/1` over the S2VNA socket server on 5025
 - Chassis — `ETS Lindgren EMCenter version 4.6.0`
-- Slot 1, device A — `ETS-Lindgren, EMControl 7006-001, 2.10.3`
-- Slot 1B → `ERROR 305` (no second device); slot 2 answers a *different* error
-  (`Error 23`) so some other card is present; slots 3–8 → `ERROR 21` (empty)
-- Turntable parked at **90.0°**, speed **100.0%**, `ACC?` 2.0, `ERR?` 0
+- Slot 1A — `ETS-Lindgren, EMControl 7006-001, 2.10.3`; slots 3–8 empty, slot 2
+  holds some other card that rejects EMControl mnemonics
+- Motion confirmed visually: 90°→150°→90° at 40% speed, ~6.7 deg/s
 
-**VNA path — passing.** `configure()`, `frequencies()` and `measure()` all behave:
-101 points spanning exactly the requested 2.000–3.000 GHz, magnitudes −113.8 to
-−92.1 dB (noise floor, nothing connected to the ports). Instrument state was
-saved and restored around the test, so the chamber's 100 kHz–22 GHz S11 setup is
-untouched.
+**Thru-line reference run (`thru_run/`), 72 angles × 101 freqs, 2–3 GHz:**
+- S21 flat to **0.019 dB peak-to-peak across the full rotation**; std dev
+  0.0029 dB; worst per-frequency angular spread 0.025 dB at 2.040 GHz
+- Polar plot is a clean circle — the correct answer for a thru, and a good
+  system-stability figure for the whole chain
+- Mean level −0.88 dB (cable loss)
 
-**Positioner path — passing, read-only.** `identity()`, `position()`, `speed()`,
-`latched_error()` and `in_motion()` all correct; a bad query raises `RuntimeError`
-and the stream stays in sync afterwards. **Nothing has been commanded to move.**
+**Link quality is the open concern.** That run logged 3 `ERROR 1` retries on
+outgoing `SK` commands and 2 corrupted position reads — roughly 7% of exchanges
+affected. The corrupted reads decoded as split replies (`'255.0 DEGREES'` →
+`'2'` + `'55.0 DEGREES'`), which is why position replies are now format-validated.
+All are handled in software now, but the physical cause is unaddressed: candidates
+are USB cable quality, a hub in the path, or RF pickup from the VNA in the chamber.
 
-Ten bugs fixed: five found by code review (motion-start race, angle overshoot,
-duplicate 360°, silent row truncation, unchecked sweep errors) and five that only
-hardware contact could expose (serial framing never applied, wrong slot, position
-reply carries units, wrong speed mnemonic, write-reply desync) — plus the
-unsupported `SENS:SWE:TIME?`. See Decisions.
-
-**Open — distinguishing simulation from emulation.** *Device Emulation* was
-switched on at the front panel; a re-probe confirms it changes nothing about the
-command set (identity, `CP?`, `*OPC?`, `SPEED?`, `ERR?` all byte-identical), but
-it is a legacy-protocol compatibility feature, not motion suppression. No
-read-only query distinguishes "simulating" from "ready to move", so the real
-Simulation toggle has to be found on the EMControl device page before
-`--dry-run` can be run without turning the tower.
-
-Also unresolved: no over-the-wire way to read the turntable's software limits or
-continuous/non-continuous mode on this firmware — confirm on the front panel.
+Eleven bugs fixed total: five from code review, five that only hardware contact
+could expose, plus the unsupported `SENS:SWE:TIME?` — see Decisions.
 
 # ToDo
 
-- [ ] Find the EMControl **Simulation** setting (distinct from Device Emulation)
-      and switch Device Emulation back off.
-- [ ] Run `pattern_measure.py --dry-run --step 5` against simulation mode to
-      exercise `seek()` over all 72 angles with nothing turning.
-- [ ] Confirm turntable continuous / non-continuous mode and the cable path on
-      the EMControl front panel — not readable over the wire.
-- [ ] First commanded motion on real mechanics, then a first real cut on a
-      reference antenna to sanity-check pattern shape.
+- [ ] Chase the FTDI link corruption physically — try a different cable, remove
+      any hub from the path, check routing relative to the VNA and chamber feed.
+- [ ] Build the browser dashboard (see Plan) — WebSocket service plus Vite
+      frontend, mirroring the Phaser architecture and visual language.
+- [ ] Confirm turntable continuous / non-continuous mode on the front panel
+      before any run with a cable routed through the tower.
+- [ ] Switch Device Emulation back off — it changes nothing we depend on, but
+      it is an uncharacterized variable.
+- [ ] First real cut on a reference antenna to sanity-check pattern shape.
 - [ ] Add sweep averaging; consider wiring `ACC?`/acceleration into the config.
-- [ ] Consider restoring VNA trigger state on exit — a run leaves the instrument
-      in `TRIG:SOUR BUS`, which makes the S2VNA GUI look frozen afterwards.
-- [x] ~~Install the ETS-Lindgren EMCenter USB/VCP driver~~ — done, now COM16.
-- [x] ~~Point `PositionerConfig.resource` at the real port~~ — `ASRL16::INSTR`.
-- [x] ~~Cross-check `PositionerCmds` mnemonics~~ — probed directly against the card.
-- [x] ~~Resolve the VISA backend~~ — `pyvisa-py` via the `sim` extra.
+- [x] ~~Install the ETS-Lindgren EMCenter USB/VCP driver~~ — done, COM16.
+- [x] ~~Cross-check `PositionerCmds` mnemonics~~ — probed against the card.
 - [x] ~~Enable the S2VNA socket server~~ — done, listening on 5025.
-- [x] ~~Verify the VNA SCPI mnemonics~~ — full path exercised on hardware.
+- [x] ~~Verify the VNA SCPI path~~ — configure/frequencies/measure all exercised.
+- [x] ~~Validate `seek()` against real mechanics~~ — visually confirmed.
+- [x] ~~First full collection run~~ — 72-point thru reference in `thru_run/`.
