@@ -140,6 +140,10 @@ class ScanConfig:
 # Instrument wrappers
 # --------------------------------------------------------------------------
 
+class Aborted(Exception):
+    """Raised when a move is cancelled through seek()'s should_abort hook."""
+
+
 class Vna:
     def __init__(self, rm: pyvisa.ResourceManager, cfg: VnaConfig):
         self.cfg = cfg
@@ -382,10 +386,18 @@ class Positioner:
     def zero_here(self) -> None:
         self._w(self.cmds.set_pos.format(pos=0.0))
 
-    def seek(self, deg: float) -> float:
+    def seek(self, deg: float, should_abort=None) -> float:
         """Command an absolute move and block until the tower is verifiably parked
         at `deg`. Arrival is confirmed by position readback, never by elapsed time:
-        a sweep taken while the tower is still turning is silently corrupt."""
+        a sweep taken while the tower is still turning is silently corrupt.
+
+        `should_abort` is an optional zero-argument predicate polled while the
+        tower is moving. When it returns true the move is stopped and Aborted is
+        raised. It exists so a UI stop button can preempt a move that may run for
+        tens of seconds: the caller owning the serial port acts on a flag, rather
+        than a second thread writing a stop command into the middle of this
+        thread's request/response exchange. Serial access stays single-threaded.
+        """
         if abs(_wrap180(self.position() - deg)) <= self.cfg.position_tol_deg:
             return self.position()          # already parked; no move to wait on
 
@@ -404,6 +416,9 @@ class Positioner:
 
         deadline = time.monotonic() + self.cfg.move_timeout_s
         while self.in_motion():
+            if should_abort is not None and should_abort():
+                self.stop()
+                raise Aborted(f"move to {deg:.1f} deg aborted by request")
             if time.monotonic() > deadline:
                 self.stop()
                 raise TimeoutError(f"positioner did not reach {deg:.1f} deg in time")

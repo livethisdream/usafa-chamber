@@ -11,3 +11,6 @@ __pycache__/
 # Measurement run outputs - commit a run deliberately if it is worth keeping
 pattern_run/
 *_run/
+node_modules/
+frontend/dist/
+runs/

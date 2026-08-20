@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>USAFA Chamber</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Outfit:wght@500;600;700&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div class="app-container">
+
+    <header class="app-header glass-panel">
+      <div class="brand">
+        <h1>USAFA Chamber</h1>
+        <span class="badge" id="mode-badge">offline</span>
+      </div>
+      <div class="header-right">
+        <div class="readout">
+          <span class="readout-label">Angle</span>
+          <span class="readout-value" id="angle-readout">—</span>
+        </div>
+        <div class="readout">
+          <span class="readout-label">Speed</span>
+          <span class="readout-value" id="speed-readout">—</span>
+        </div>
+        <span class="status-dot" id="conn-dot" title="disconnected"></span>
+        <button class="btn btn-ghost" id="theme-toggle" title="Toggle theme">◐</button>
+      </div>
+    </header>
+
+    <main class="layout">
+
+      <aside class="controls-panel glass-panel">
+        <section class="group">
+          <h2 class="panel-title">Instruments</h2>
+          <div class="kv"><span>VNA</span><span id="vna-idn" class="mono">—</span></div>
+          <div class="kv"><span>Positioner</span><span id="pos-idn" class="mono">—</span></div>
+          <div class="kv"><span>Latched err</span><span id="pos-err" class="mono">—</span></div>
+        </section>
+
+        <div class="divider"></div>
+
+        <section class="group">
+          <h2 class="panel-title">Sweep</h2>
+          <label class="field"><span>Start (GHz)</span><input type="number" id="f-start" value="2" step="0.1" min="0.0001"></label>
+          <label class="field"><span>Stop (GHz)</span><input type="number" id="f-stop" value="3" step="0.1" min="0.0001"></label>
+          <label class="field"><span>Points</span><input type="number" id="f-points" value="101" step="1" min="2"></label>
+          <label class="field"><span>IF BW (Hz)</span><input type="number" id="f-ifbw" value="1000" step="100" min="1"></label>
+          <label class="field"><span>Power (dBm)</span><input type="number" id="f-power" value="0" step="1"></label>
+          <label class="field"><span>Parameter</span>
+            <select id="f-param">
+              <option>S21</option><option>S11</option><option>S12</option><option>S22</option>
+            </select>
+          </label>
+        </section>
+
+        <div class="divider"></div>
+
+        <section class="group">
+          <h2 class="panel-title">Rotation</h2>
+          <label class="field"><span>From (deg)</span><input type="number" id="a-start" value="0" step="1"></label>
+          <label class="field"><span>To (deg)</span><input type="number" id="a-stop" value="355" step="1"></label>
+          <label class="field"><span>Step (deg)</span><input type="number" id="a-step" value="5" step="0.5" min="0.1"></label>
+          <label class="field"><span>Speed (%)</span><input type="number" id="a-speed" value="100" step="5" min="1" max="100"></label>
+          <div class="hint" id="angle-count">72 angles</div>
+        </section>
+
+        <div class="divider"></div>
+
+        <section class="group">
+          <h2 class="panel-title">Jog</h2>
+          <div class="jog-row">
+            <button class="btn" data-jog="-10">−10°</button>
+            <button class="btn" data-jog="-1">−1°</button>
+            <button class="btn" data-jog="1">+1°</button>
+            <button class="btn" data-jog="10">+10°</button>
+          </div>
+          <div class="jog-row">
+            <input type="number" id="jog-abs" placeholder="go to deg" step="1">
+            <button class="btn" id="btn-goto">Go</button>
+          </div>
+          <button class="btn btn-ghost full" id="btn-zero">Define here as 0°</button>
+        </section>
+
+        <div class="action-row">
+          <button class="btn btn-primary full" id="btn-scan">Start scan</button>
+          <button class="btn btn-danger full" id="btn-stop">STOP</button>
+        </div>
+      </aside>
+
+      <section class="graph-area">
+        <div class="graph-panel glass-panel">
+          <div class="panel-header-row">
+            <h2 class="panel-title">Pattern</h2>
+            <div class="chart-tools">
+              <label class="inline-field"><span>Cut freq</span>
+                <select id="cut-freq"></select>
+              </label>
+              <label class="inline-check"><input type="checkbox" id="normalize" checked><span>Normalize</span></label>
+            </div>
+          </div>
+          <div id="chart-polar" class="chart"></div>
+        </div>
+
+        <div class="graph-panel glass-panel">
+          <div class="panel-header-row">
+            <h2 class="panel-title">Trace</h2>
+            <div class="chart-tools">
+              <span class="hint" id="trace-label">latest cut</span>
+            </div>
+          </div>
+          <div id="chart-rect" class="chart chart-short"></div>
+        </div>
+      </section>
+
+    </main>
+
+    <footer class="log-panel glass-panel">
+      <div class="panel-header-row">
+        <h2 class="panel-title">Log</h2>
+        <div class="chart-tools">
+          <progress id="scan-progress" max="100" value="0"></progress>
+          <span class="hint" id="progress-label">idle</span>
+          <button class="btn btn-ghost" id="btn-clear-log">Clear</button>
+        </div>
+      </div>
+      <div id="log" class="log"></div>
+    </footer>
+
+  </div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
