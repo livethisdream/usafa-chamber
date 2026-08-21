@@ -47,6 +47,59 @@ against it works unchanged on the real rig. It synthesizes an array-factor patte
 believable rate, so live position, progress and the stop button all have something
 real to exercise.
 
+`uicheck.py` drives the built dashboard against that simulator in headless
+Chromium and asserts on what the page shows rather than on what the service sent:
+
+```bash
+pip install playwright && playwright install chromium
+npm --prefix frontend install && npm --prefix frontend run build
+python uicheck.py                  # screenshots land in ui-shots/
+```
+
+## The dashboard
+
+The chrome follows [`livethisdream/phaser`](https://github.com/livethisdream/phaser)
+— same tokens, same components — so the two applications read as one family:
+
+- **An accordion of settings** on the left, over four sections: **VNA**,
+  **Turntable** (the angle grid, plus jog and define-zero), **Simulation**, and
+  **Output** (run name, and the stored runs, any of which can be reloaded into the
+  plots). Collapsing the sidebar leaves an icon rail behind, and clicking a rail
+  icon expands straight back into that section.
+- **Tabs over the plots**: Pattern Measurement, VNA, Turntable, Logs. Inactive
+  panes are hidden with `visibility`, not `display`, so a chart keeps its size and
+  comes back drawn rather than the wrong shape.
+- **Theme at the foot of the sidebar**, cycling system → light → dark. System is
+  the default and stays live: flipping the OS theme with the page open moves the
+  page with it, until someone picks a side.
+
+Start scan and **STOP** sit in the tab header rather than in the accordion, because
+STOP must never be a scroll away.
+
+The Turntable tab draws the axis: commanded against reported, and which points on
+the grid are measured. It is canvas rather than Plotly (`frontend/src/dial.js`) —
+an instrument face needs no axes, legend, or hover.
+
+### Comparing against a simulation
+
+The Simulation section imports a pattern and overlays it on the measured cut in
+amber, with an RMS deviation in the footer. It reads this project's own
+`pattern.csv` and, failing that, any CSV carrying an angle column and a dB column,
+which covers most solver exports. Both traces are normalized to their own peak, so
+a model in dBi and a measurement in raw S21 dB are still comparable; **Rotate**
+takes out a known mount offset.
+
+The comparison is clamped 30 dB below peak before differencing, which matters more
+than it sounds. Nulls are where a model and a measurement disagree most and where
+the disagreement means least — a null one degree off its predicted angle
+differences to tens of dB against a neighbouring lobe. Un-clamped, the RMS reports
+null alignment rather than pattern agreement.
+
+Parsing happens in the browser (`frontend/src/reference.js`); nothing is uploaded,
+and the service never learns a comparison is running. `uicheck.py` re-imports a
+finished run's own `pattern.csv` and asserts the deviation comes back at 0.00 dB,
+which is a round trip through the writer, the parser, and the comparator at once.
+
 ## Software and drivers
 
 Neither instrument works out of the box on a fresh machine. Both of these were
@@ -123,6 +176,7 @@ suspect cable, hub, or RF pickup rather than the software.
 | `pattern_measure.py` | Instrument wrappers and standalone step-and-measure acquisition |
 | `chamber_service.py` | WebSocket service (port 8766), hardware + simulated backends |
 | `frontend/` | Vite + Plotly dashboard |
+| `uicheck.py` | Browser check: drives the built dashboard against `--sim` |
 | `runs/` | Dashboard scan output; each `meta.json` records `mode` as `hw` or `sim` |
 | `thru_run/` | Thru-line reference measurement, 72 angles × 101 freqs |
 | `project/usafa-chamber_PROJECT.md` | Detailed status, decisions, and open items |
