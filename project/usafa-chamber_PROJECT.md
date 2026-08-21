@@ -154,8 +154,20 @@ roughly 0.03 dB of angular structure, a real measurement is showing signal.
 - [ ] Fix the stale line in **Special Instructions** claiming the EMCenter
       mnemonics are unverified — they were probed directly against the card and
       are recorded in `PositionerCmds`. (Section is read-only to `/bye`.)
-- [ ] Decide how to reconcile `claude/vna-antenna-controller-vaa34u` with `main`
-      — unrelated histories, overlapping scope, one file differing only in case.
+- [x] Reconcile `claude/vna-antenna-controller-vaa34u` with `main`. **Decided:
+      port onto `main`, never merge into it.** `main` is the only lineage that has
+      touched the rig, and merging unrelated histories would have collided on
+      every shared frontend file plus the case-differing project note. Lifted
+      instead, in order: the Phaser chrome (#2), the fault-injecting mocks and
+      `rigcheck.py` (#3), then `bringup.py`. The branch is preserved as
+      `archive/mock-lineage` at the same SHA.
+      - [ ] Delete the superseded `claude/vna-antenna-controller-vaa34u` branch.
+            Left undone only because this session's git proxy refuses ref
+            deletions; one click in the GitHub branch list, or
+            `git push origin --delete claude/vna-antenna-controller-vaa34u`
+            from a normal checkout.
+      - [ ] The archived lineage's `reference.js` still carries the un-clamped
+            comparison metric. Only matters if anyone revives it.
 - [ ] Chase the FTDI link corruption physically — different cable, no hub, check
       routing relative to the VNA and chamber feed.
 - [ ] Exercise `setup.ps1` on a fresh machine and against a connected rig; the
