@@ -178,7 +178,10 @@ breaks — otherwise the guarded case would pass even with the guard gone.
 - [ ] Decide how to reconcile `claude/vna-antenna-controller-vaa34u` with `main`
       — unrelated histories, overlapping scope, one file differing only in case.
 - [ ] Chase the FTDI link corruption physically — different cable, no hub, check
-      routing relative to the VNA and chamber feed.
+      routing relative to the VNA and chamber feed. `bringup.py` stage 4 now
+      measures the error rate over N raw position reads, so each change is a
+      before/after number rather than an impression; it reads the port directly
+      because the driver's retry would hide exactly what is being measured.
 - [ ] Exercise `setup.ps1` on a fresh machine and against a connected rig; the
       problem-code-28 branch has never run against a real failed install.
 - [ ] Phase 2: hardware-path polish in the UI; surface link-retry warnings to the

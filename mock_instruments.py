@@ -151,6 +151,8 @@ class FakeVna:
             return "0.0213\n"
         if "SYST:ERR?" in c:
             return '0,"No error"\n'
+        if "CORR:STAT?" in c:
+            return "1\n"
         if c.startswith("TRIG:SOUR?"):
             return self.trig_source + "\n"
         if c.startswith("INIT") and ":CONT?" in c:
