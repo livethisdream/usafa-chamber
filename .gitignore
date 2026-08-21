@@ -17,3 +17,6 @@ pattern_run/
 node_modules/
 frontend/dist/
 runs/
+
+# Screenshots from uicheck.py
+ui-shots/

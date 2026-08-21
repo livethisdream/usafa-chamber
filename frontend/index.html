@@ -1,135 +1,372 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>USAFA Chamber</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Outfit:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@400;500;600&display=swap" rel="stylesheet" />
 </head>
 <body>
   <div class="app-container">
 
-    <header class="app-header glass-panel">
-      <div class="brand">
-        <h1>USAFA Chamber</h1>
-        <span class="badge" id="mode-badge">offline</span>
-      </div>
-      <div class="header-right">
-        <div class="readout">
-          <span class="readout-label">Angle</span>
-          <span class="readout-value" id="angle-readout">—</span>
+    <main class="dashboard" id="dashboard">
+
+      <!-- Controls column (accordion) -->
+      <aside class="controls-panel glass-panel" id="settings-panel">
+
+        <!-- Icon rail, shown when the panel is collapsed -->
+        <div class="sidebar-icons" id="sidebar-icons">
+          <button class="sidebar-icon-btn" id="btn-toggle-settings-icon" title="Expand settings" aria-label="Expand settings" style="border-color: var(--primary); color: var(--primary);">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 5.5h14v13H5z"></path>
+              <path d="M9 5.5v13"></path>
+              <path d="M13.5 12h3"></path>
+              <path d="M15 10.5l1.5 1.5-1.5 1.5"></path>
+            </svg>
+          </button>
+          <button class="sidebar-icon-btn" data-section="0" title="VNA" aria-label="VNA">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3.5 6.5h17v11h-17z"></path>
+              <path d="M6 14c1.6 0 1.6-4 3.2-4s1.6 4 3.2 4 1.6-4 3.2-4 1.6 4 3.2 4"></path>
+            </svg>
+          </button>
+          <button class="sidebar-icon-btn" data-section="1" title="Turntable" aria-label="Turntable">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="7.5"></circle>
+              <circle cx="12" cy="12" r="1.6"></circle>
+              <path d="M12 4.5V2.6"></path>
+              <path d="M18.6 8.4a7.5 7.5 0 0 1-2.2 9.6"></path>
+              <path d="M16.6 15.4l-.2 2.6 2.6-.3"></path>
+            </svg>
+          </button>
+          <button class="sidebar-icon-btn" data-section="2" title="Simulation" aria-label="Simulation">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3.5 18.5h17"></path>
+              <path d="M4.5 15c2.5 0 3.2-8 5.7-8s3.2 8 5.7 8 2.3-4 3.6-4"></path>
+              <path d="M4.5 18c2.5 0 3.6-5.5 5.7-5.5s3.6 5.5 5.7 5.5" stroke-dasharray="2.4 2.2"></path>
+            </svg>
+          </button>
+          <button class="sidebar-icon-btn" data-section="3" title="Output" aria-label="Output">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 4.5h9.5L19 9v10.5H5z"></path>
+              <path d="M14 4.5V9h5"></path>
+              <path d="M8.5 13.5h7M8.5 16.5h4.5"></path>
+            </svg>
+          </button>
+          <div class="sidebar-icons-spacer"></div>
+          <button class="sidebar-icon-btn" id="btn-theme-icon" title="Theme: system" aria-label="Theme: system">
+            <svg viewBox="0 0 24 24" aria-hidden="true" class="icon-system">
+              <rect x="3" y="5" width="18" height="12" rx="1.5"></rect>
+              <path d="M9 20.5h6M12 17v3.5"></path>
+            </svg>
+            <svg viewBox="0 0 24 24" aria-hidden="true" class="icon-moon" style="display:none">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+            </svg>
+            <svg viewBox="0 0 24 24" aria-hidden="true" class="icon-sun" style="display:none">
+              <circle cx="12" cy="12" r="5"></circle>
+              <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
+            </svg>
+          </button>
         </div>
-        <div class="readout">
-          <span class="readout-label">Speed</span>
-          <span class="readout-value" id="speed-readout">—</span>
-        </div>
-        <span class="status-dot" id="conn-dot" title="disconnected"></span>
-        <button class="btn btn-ghost" id="theme-toggle" title="Toggle theme">◐</button>
-      </div>
-    </header>
 
-    <main class="layout">
-
-      <aside class="controls-panel glass-panel">
-        <section class="group">
-          <h2 class="panel-title">Instruments</h2>
-          <div class="kv"><span>VNA</span><span id="vna-idn" class="mono">—</span></div>
-          <div class="kv"><span>Positioner</span><span id="pos-idn" class="mono">—</span></div>
-          <div class="kv"><span>Latched err</span><span id="pos-err" class="mono">—</span></div>
-        </section>
-
-        <div class="divider"></div>
-
-        <section class="group">
-          <h2 class="panel-title">Sweep</h2>
-          <label class="field"><span>Start (GHz)</span><input type="number" id="f-start" value="2" step="0.1" min="0.0001"></label>
-          <label class="field"><span>Stop (GHz)</span><input type="number" id="f-stop" value="3" step="0.1" min="0.0001"></label>
-          <label class="field"><span>Points</span><input type="number" id="f-points" value="101" step="1" min="2"></label>
-          <label class="field"><span>IF BW (Hz)</span><input type="number" id="f-ifbw" value="1000" step="100" min="1"></label>
-          <label class="field"><span>Power (dBm)</span><input type="number" id="f-power" value="0" step="1"></label>
-          <label class="field"><span>Parameter</span>
-            <select id="f-param">
-              <option>S21</option><option>S11</option><option>S12</option><option>S22</option>
-            </select>
-          </label>
-        </section>
-
-        <div class="divider"></div>
-
-        <section class="group">
-          <h2 class="panel-title">Rotation</h2>
-          <label class="field"><span>From (deg)</span><input type="number" id="a-start" value="0" step="1"></label>
-          <label class="field"><span>To (deg)</span><input type="number" id="a-stop" value="355" step="1"></label>
-          <label class="field"><span>Step (deg)</span><input type="number" id="a-step" value="5" step="0.5" min="0.1"></label>
-          <label class="field"><span>Speed (%)</span><input type="number" id="a-speed" value="100" step="5" min="1" max="100"></label>
-          <div class="hint" id="angle-count">72 angles</div>
-        </section>
-
-        <div class="divider"></div>
-
-        <section class="group">
-          <h2 class="panel-title">Jog</h2>
-          <div class="jog-row">
-            <button class="btn" data-jog="-10">−10°</button>
-            <button class="btn" data-jog="-1">−1°</button>
-            <button class="btn" data-jog="1">+1°</button>
-            <button class="btn" data-jog="10">+10°</button>
+        <!-- Full sidebar, shown when expanded -->
+        <div id="sidebar-content">
+          <div class="panel-header-row">
+            <h2 class="panel-title">Settings</h2>
+            <button class="btn btn-outline btn-small icon-toggle-btn" id="btn-toggle-settings" title="Collapse settings" aria-label="Collapse settings">−</button>
           </div>
-          <div class="jog-row">
-            <input type="number" id="jog-abs" placeholder="go to deg" step="1">
-            <button class="btn" id="btn-goto">Go</button>
-          </div>
-          <button class="btn btn-ghost full" id="btn-zero">Define here as 0°</button>
-        </section>
 
-        <div class="action-row">
-          <button class="btn btn-primary full" id="btn-scan">Start scan</button>
-          <button class="btn btn-danger full" id="btn-stop">STOP</button>
+          <div class="accordion" id="accordionSettings">
+
+            <!-- 0. VNA -->
+            <div class="accordion-item active">
+              <button class="accordion-header" title="Copper Mountain sweep settings, and what the instrument reports back">
+                <span class="accordion-head-left"><span class="accordion-icon" data-icon="0"></span> VNA</span>
+                <span class="chevron">▼</span>
+              </button>
+              <div class="accordion-body">
+                <div class="kv"><span>Identity</span><span id="vna-idn" class="mono">—</span></div>
+                <hr class="divider" />
+                <div class="field-row">
+                  <div class="control-group">
+                    <label for="f-start">Start (GHz)</label>
+                    <input class="modern-input" type="number" id="f-start" value="2" step="0.1" min="0.0001" />
+                  </div>
+                  <div class="control-group">
+                    <label for="f-stop">Stop (GHz)</label>
+                    <input class="modern-input" type="number" id="f-stop" value="3" step="0.1" min="0.0001" />
+                  </div>
+                </div>
+                <div class="field-row">
+                  <div class="control-group">
+                    <label for="f-points">Points</label>
+                    <input class="modern-input" type="number" id="f-points" value="101" step="1" min="2" />
+                  </div>
+                  <div class="control-group">
+                    <label for="f-ifbw" title="Lower IF bandwidth buys dynamic range and costs sweep time">IF BW (Hz)</label>
+                    <input class="modern-input" type="number" id="f-ifbw" value="1000" step="100" min="1" />
+                  </div>
+                </div>
+                <div class="field-row">
+                  <div class="control-group">
+                    <label for="f-power">Power (dBm)</label>
+                    <input class="modern-input" type="number" id="f-power" value="0" step="1" />
+                  </div>
+                  <div class="control-group">
+                    <label for="f-param">Parameter</label>
+                    <select class="modern-select" id="f-param">
+                      <option>S21</option><option>S11</option><option>S12</option><option>S22</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 1. Turntable -->
+            <div class="accordion-item">
+              <button class="accordion-header" title="The angle grid for the next scan, and direct control of the axis right now">
+                <span class="accordion-head-left"><span class="accordion-icon" data-icon="1"></span> Turntable</span>
+                <span class="chevron">▼</span>
+              </button>
+              <div class="accordion-body">
+                <div class="kv"><span>Identity</span><span id="pos-idn" class="mono">—</span></div>
+                <div class="kv"><span>Latched error</span><span id="pos-err" class="mono">—</span></div>
+                <hr class="divider" />
+                <div class="field-row">
+                  <div class="control-group">
+                    <label for="a-start">From (deg)</label>
+                    <input class="modern-input" type="number" id="a-start" value="0" step="1" />
+                  </div>
+                  <div class="control-group">
+                    <label for="a-stop">To (deg)</label>
+                    <input class="modern-input" type="number" id="a-stop" value="355" step="1" />
+                  </div>
+                </div>
+                <div class="field-row">
+                  <div class="control-group">
+                    <label for="a-step">Step (deg)</label>
+                    <input class="modern-input" type="number" id="a-step" value="5" step="0.5" min="0.1" />
+                  </div>
+                  <div class="control-group">
+                    <label for="a-speed">Speed (%)</label>
+                    <input class="modern-input" type="number" id="a-speed" value="100" step="5" min="1" max="100" />
+                  </div>
+                </div>
+                <p class="hint" id="angle-count">72 angles</p>
+
+                <hr class="divider" />
+                <div class="control-group">
+                  <label>Jog</label>
+                  <div class="jog-row">
+                    <button class="btn btn-outline btn-small" data-jog="-10">−10°</button>
+                    <button class="btn btn-outline btn-small" data-jog="-1">−1°</button>
+                    <button class="btn btn-outline btn-small" data-jog="1">+1°</button>
+                    <button class="btn btn-outline btn-small" data-jog="10">+10°</button>
+                  </div>
+                </div>
+                <div class="field-row">
+                  <div class="control-group">
+                    <label for="jog-abs">Go to (deg)</label>
+                    <input class="modern-input" type="number" id="jog-abs" placeholder="absolute" step="1" />
+                  </div>
+                  <div class="control-group">
+                    <label>&nbsp;</label>
+                    <button class="btn btn-outline btn-small full" id="btn-goto">Go</button>
+                  </div>
+                </div>
+                <button class="btn btn-outline btn-small full" id="btn-zero" title="Redefine the current position as zero degrees">Define here as 0°</button>
+              </div>
+            </div>
+
+            <!-- 2. Simulation -->
+            <div class="accordion-item">
+              <button class="accordion-header" title="Import a simulated or previously measured pattern and compare it against the live cut">
+                <span class="accordion-head-left"><span class="accordion-icon" data-icon="2"></span> Simulation</span>
+                <span class="chevron">▼</span>
+              </button>
+              <div class="accordion-body">
+                <div class="control-group">
+                  <label for="ref-file">Import pattern</label>
+                  <input class="file-input" type="file" id="ref-file" accept=".csv,.txt" />
+                  <p class="hint">
+                    A run's <code>pattern.csv</code>, or any CSV with angle and dB
+                    columns.
+                  </p>
+                </div>
+                <div class="ref-summary" id="ref-summary" hidden>
+                  <div class="ref-name" id="ref-name">—</div>
+                  <div class="field-row">
+                    <div class="control-group">
+                      <label for="ref-param">Parameter</label>
+                      <select class="modern-select" id="ref-param"></select>
+                    </div>
+                    <div class="control-group">
+                      <label for="ref-freq">Frequency</label>
+                      <select class="modern-select" id="ref-freq"></select>
+                    </div>
+                  </div>
+                  <label class="toggle-container mt-2">
+                    <span>Overlay on pattern</span>
+                    <input type="checkbox" id="ref-show" checked /><span class="checkmark"></span>
+                  </label>
+                  <label class="toggle-container mt-2" title="Align the reference peak with the measured peak before differencing">
+                    <span>Normalize to peak</span>
+                    <input type="checkbox" id="ref-normalize" checked /><span class="checkmark"></span>
+                  </label>
+                  <div class="field-row mt-2">
+                    <div class="control-group">
+                      <label for="ref-rotate" title="Rotate the reference to line up a mount offset">Rotate (deg)</label>
+                      <input class="modern-input" type="number" id="ref-rotate" value="0" step="1" />
+                    </div>
+                    <div class="control-group">
+                      <label>&nbsp;</label>
+                      <button class="btn btn-outline btn-small full" id="btn-ref-clear">Clear</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 3. Output -->
+            <div class="accordion-item">
+              <button class="accordion-header" title="Name the next run, and reload one the service already wrote">
+                <span class="accordion-head-left"><span class="accordion-icon" data-icon="3"></span> Output</span>
+                <span class="chevron">▼</span>
+              </button>
+              <div class="accordion-body">
+                <div class="control-group">
+                  <label for="run-name" title="Left empty, the service stamps a name from the date and time">Run name</label>
+                  <input class="modern-input" type="text" id="run-name" placeholder="auto — stamped from the clock" />
+                </div>
+                <p class="hint">
+                  Each run writes <code>pattern.csv</code> and
+                  <code>meta.json</code> under <code>runs/</code>.
+                </p>
+                <hr class="divider" />
+                <div class="panel-header-row tight">
+                  <label style="margin:0;">Stored runs</label>
+                  <button class="btn btn-outline btn-small" id="btn-refresh-runs">Refresh</button>
+                </div>
+                <div class="runs-list" id="runs-list">
+                  <p class="hint">Nothing loaded yet.</p>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- Theme toggle, bottom of the sidebar -->
+          <div class="sidebar-footer">
+            <button class="btn btn-outline btn-small theme-toggle" id="theme-toggle" title="Theme: system" aria-label="Theme: system">
+              <span class="theme-icon">◐</span>
+              <span class="theme-label">System theme</span>
+            </button>
+          </div>
         </div>
       </aside>
 
-      <section class="graph-area">
-        <div class="graph-panel glass-panel">
-          <div class="panel-header-row">
-            <h2 class="panel-title">Pattern</h2>
-            <div class="chart-tools">
-              <label class="inline-field"><span>Cut freq</span>
-                <select id="cut-freq"></select>
-              </label>
-              <label class="inline-check"><input type="checkbox" id="normalize" checked><span>Normalize</span></label>
+      <!-- Graph panel (tabs) -->
+      <section class="graph-panel glass-panel flex-grow">
+        <div class="header-with-tabs">
+          <div class="header-left">
+            <span class="app-wordmark">USAFA <strong>Chamber</strong></span>
+            <div class="tab-list">
+              <button class="tab-btn active" data-target="tab-pattern">Pattern Measurement</button>
+              <button class="tab-btn" data-target="tab-vna">VNA</button>
+              <button class="tab-btn" data-target="tab-turntable">Turntable</button>
+              <button class="tab-btn" data-target="tab-logs">Logs</button>
             </div>
           </div>
-          <div id="chart-polar" class="chart"></div>
+          <!-- Scan and STOP live here rather than in the accordion: STOP is the
+               one control that must never be a scroll away. -->
+          <div class="header-actions">
+            <span class="status-pill" id="mode-badge">offline</span>
+            <button class="btn btn-danger btn-small" id="btn-stop">STOP</button>
+            <button class="btn btn-primary btn-small" id="btn-scan">Start scan</button>
+          </div>
         </div>
 
-        <div class="graph-panel glass-panel">
-          <div class="panel-header-row">
-            <h2 class="panel-title">Trace</h2>
-            <div class="chart-tools">
-              <span class="hint" id="trace-label">latest cut</span>
+        <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+
+        <div class="plots-stack">
+
+          <div class="chart-wrapper tab-content active" id="tab-pattern">
+            <div class="tab-pane">
+              <div class="pane-header">
+                <h3>Pattern</h3>
+                <div class="pane-tools">
+                  <label class="inline-field"><span>Cut freq</span>
+                    <select class="modern-select" id="cut-freq"></select>
+                  </label>
+                  <label class="toggle-container compact">
+                    <span>Normalize</span>
+                    <input type="checkbox" id="normalize" checked /><span class="checkmark"></span>
+                  </label>
+                </div>
+              </div>
+              <div class="pane-body"><div id="chart-polar" class="chart"></div></div>
             </div>
           </div>
-          <div id="chart-rect" class="chart chart-short"></div>
+
+          <div class="chart-wrapper tab-content" id="tab-vna">
+            <div class="tab-pane">
+              <div class="pane-header">
+                <h3>Spectrum at current angle</h3>
+                <span class="status-pill" id="trace-label">latest cut</span>
+              </div>
+              <div class="pane-body"><div id="chart-rect" class="chart"></div></div>
+            </div>
+          </div>
+
+          <div class="chart-wrapper tab-content" id="tab-turntable">
+            <div class="tab-pane">
+              <div class="pane-header">
+                <h3>Axis position</h3>
+                <span class="status-pill" id="pill-motion">stopped</span>
+              </div>
+              <div class="pane-body dial-body">
+                <canvas id="dial"></canvas>
+                <div class="dial-readout">
+                  <div class="stat-box"><span class="stat-label">Commanded</span><span class="stat-value" id="stat-cmd">—</span></div>
+                  <div class="stat-box"><span class="stat-label">Actual</span><span class="stat-value" id="angle-readout">—</span></div>
+                  <div class="stat-box"><span class="stat-label">Speed</span><span class="stat-value" id="speed-readout">—</span></div>
+                  <div class="stat-box"><span class="stat-label">Grid</span><span class="stat-value" id="stat-grid">—</span></div>
+                  <div class="stat-box"><span class="stat-label">Remaining</span><span class="stat-value" id="stat-remaining">—</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="chart-wrapper tab-content" id="tab-logs">
+            <div class="logs-pane">
+              <div class="logs-toolbar">
+                <span class="logs-title">Runtime log</span>
+                <button class="btn btn-outline btn-small" id="btn-clear-log">Clear</button>
+              </div>
+              <div class="log-console" id="log" aria-live="polite"></div>
+            </div>
+          </div>
+
+        </div>
+
+        <div class="chart-stats">
+          <div class="stat-box compact"><span class="stat-label">Angle</span><span class="stat-value" id="stat-angle">—</span></div>
+          <div class="stat-box compact"><span class="stat-label">Cut</span><span class="stat-value" id="stat-cut">—</span></div>
+          <div class="stat-box compact"><span class="stat-label">Peak</span><span class="stat-value" id="stat-peak">—</span></div>
+          <div class="stat-box compact"><span class="stat-label">Progress</span><span class="stat-value" id="progress-label">idle</span></div>
+          <div class="stat-box compact" id="stat-box-delta" hidden><span class="stat-label">Δ ref</span><span class="stat-value" id="stat-delta">—</span></div>
+          <div class="stats-spacer"></div>
+          <div class="status-indicator">
+            <div class="dot" id="conn-dot" title="disconnected"></div>
+            <span id="conn-text">disconnected</span>
+          </div>
         </div>
       </section>
-
     </main>
-
-    <footer class="log-panel glass-panel">
-      <div class="panel-header-row">
-        <h2 class="panel-title">Log</h2>
-        <div class="chart-tools">
-          <progress id="scan-progress" max="100" value="0"></progress>
-          <span class="hint" id="progress-label">idle</span>
-          <button class="btn btn-ghost" id="btn-clear-log">Clear</button>
-        </div>
-      </div>
-      <div id="log" class="log"></div>
-    </footer>
-
   </div>
+
   <script type="module" src="/src/main.js"></script>
 </body>
 </html>
