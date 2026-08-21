@@ -53,6 +53,17 @@ zero-filled), and a normalized polar `pattern.png` at the requested cut frequenc
 - **`grep` block-buffers when not writing to a terminal.** Piping a long-running
   script through it makes a live run look like it produced nothing.
 
+- **A failure path that closes the port without stopping the axis.** Both entry
+  points had this. The CLI stopped the positioner only on `KeyboardInterrupt`; the
+  service's scan worker caught `Exception`, logged it, and returned. Neither is
+  reachable in normal use, which is why it survived hardware bring-up — but an
+  exception raised inside `seek()`'s wait loop (a dropped poll, a rejected command,
+  a VNA read that dies on the next line) arrives with the tower **still turning**,
+  and `finally: pos.close()` then throws away the only means of stopping it. With a
+  cable routed through the tower that is the wind-up hazard, reached by a code path
+  rather than by a mistake at the panel. Found by `rigcheck.py`, not by the rig.
+  Fixed in both; `drop_sweep` and `service_stops` hold them to it.
+
 # Decisions
 
 - **2026-08-20** — Positioner arrival is confirmed by position readback, never by
@@ -133,6 +144,16 @@ roughly 0.03 dB of angular structure, a real measurement is showing signal.
 `chamber_service.py` + `frontend/` is the dashboard, runnable with no hardware via
 `--sim`. Both backends verified, including STOP preempting a live scan.
 `HardwareBackend` verified read-only against the rig.
+
+**The drivers are now under test.** `rigcheck.py` runs 17 scenarios against
+`mock_instruments.py`, which impersonates pyvisa so `Vna` and `Positioner` execute
+unmodified — the `--sim` backend never touched them, so until now every fix from
+bring-up was resting on a single manual verification. Each fault is one the rig
+actually produced: the split position reply, `ERROR 1` on a valid command, the
+unsupported `SENS:SWE:TIME?`. The FTDI corruption can now be reproduced on demand
+with no cable involved, which is the closest thing to a handle on that open
+concern. One scenario, `split_unguarded`, deletes the guard and asserts the run
+breaks — otherwise the guarded case would pass even with the guard gone.
 
 **Open concerns:**
 - *FTDI link corruption.* One 72-point run logged 3 `ERROR 1` retries and 2 split

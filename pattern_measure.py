@@ -667,6 +667,23 @@ def main(argv=None) -> int:
             pos.stop()
         return 130
     finally:
+        # Stop the axis before closing the port, on every exit path.
+        #
+        # Only KeyboardInterrupt used to do this, which left a gap: an
+        # exception raised inside seek()'s wait loop - a dropped poll, a
+        # rejected command, a VNA read that times out on the next line -
+        # propagates with the tower still turning, and closing the port first
+        # throws away the only means of stopping it. Cable wind-up is the
+        # standing hazard in this chamber, so the invariant is worth stating
+        # plainly: the axis is commanded to stop before the port goes away.
+        #
+        # Harmless on the success path, where the tower is already parked, and
+        # harmless twice after a KeyboardInterrupt - the command is idempotent.
+        if pos is not None:
+            try:
+                pos.stop()
+            except Exception:
+                pass
         if vna is not None:
             vna.close()
         if pos is not None:
