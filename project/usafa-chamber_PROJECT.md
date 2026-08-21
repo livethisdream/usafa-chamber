@@ -175,8 +175,20 @@ breaks — otherwise the guarded case would pass even with the guard gone.
 - [ ] Fix the stale line in **Special Instructions** claiming the EMCenter
       mnemonics are unverified — they were probed directly against the card and
       are recorded in `PositionerCmds`. (Section is read-only to `/bye`.)
-- [ ] Decide how to reconcile `claude/vna-antenna-controller-vaa34u` with `main`
-      — unrelated histories, overlapping scope, one file differing only in case.
+- [x] Reconcile `claude/vna-antenna-controller-vaa34u` with `main`. **Decided:
+      port onto `main`, never merge into it.** `main` is the only lineage that has
+      touched the rig, and merging unrelated histories would have collided on
+      every shared frontend file plus the case-differing project note. Lifted
+      instead, in order: the Phaser chrome (#2), the fault-injecting mocks and
+      `rigcheck.py` (#3), then `bringup.py`. The branch is preserved as
+      `archive/mock-lineage` at the same SHA.
+      - [ ] Delete the superseded `claude/vna-antenna-controller-vaa34u` branch.
+            Left undone only because this session's git proxy refuses ref
+            deletions; one click in the GitHub branch list, or
+            `git push origin --delete claude/vna-antenna-controller-vaa34u`
+            from a normal checkout.
+      - [ ] The archived lineage's `reference.js` still carries the un-clamped
+            comparison metric. Only matters if anyone revives it.
 - [ ] Chase the FTDI link corruption physically — different cable, no hub, check
       routing relative to the VNA and chamber feed. `bringup.py` stage 4 now
       measures the error rate over N raw position reads, so each change is a
@@ -187,6 +199,20 @@ breaks — otherwise the guarded case would pass even with the guard gone.
 - [ ] Phase 2: hardware-path polish in the UI; surface link-retry warnings to the
       operator instead of only stderr.
 - [ ] Phase 3: run browser — list/load stored runs, overlay cuts, export.
+- [ ] **Additional instruments — the instrument plane.** Drive more than the VNA
+      and the tower: B205minis, X310s, the AWG, and the PA. Designed but not
+      built; see `project/instrument-plane_DESIGN.md` for the roles model
+      (Source / Receiver / Positioner), the ZMQ contract for SDR control, and
+      the three constraints that need designing in from the start — socket types
+      split by guarantee, gated capture rather than free-running, and a deadman
+      on transmit.
+      - [ ] **First, the RF-off invariant.** A PA wants what the axis already
+            has: off on every exit path, before the axis stop, with a `rigcheck`
+            scenario holding it there. Worth building before any of the
+            measurement work.
+      - [ ] Answer the open questions at the foot of the design note — PA
+            control interface, X310 daughterboards, B205 clocking, and which
+            measurement is wanted first. They change what gets built.
 - [ ] Teach the simulator to replay `thru_run/pattern.csv` for real data shapes.
 - [ ] Confirm continuous / non-continuous mode on the front panel before any run
       with a cable routed through the tower.

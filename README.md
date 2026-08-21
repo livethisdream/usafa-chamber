@@ -248,6 +248,7 @@ suspect cable, hub, or RF pickup rather than the software.
 | `runs/` | Dashboard scan output; each `meta.json` records `mode` as `hw` or `sim` |
 | `thru_run/` | Thru-line reference measurement, 72 angles × 101 freqs |
 | `project/usafa-chamber_PROJECT.md` | Detailed status, decisions, and open items |
+| `project/instrument-plane_DESIGN.md` | Design note: driving SDRs, the AWG and the PA (not built) |
 
 Venvs live outside the tree because this project sits under OneDrive — `.venv-win`
 is a junction and `.venv-linux` a symlink. See `/setup-dual-venv`.
