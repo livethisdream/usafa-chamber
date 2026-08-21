@@ -175,6 +175,20 @@ roughly 0.03 dB of angular structure, a real measurement is showing signal.
 - [ ] Phase 2: hardware-path polish in the UI; surface link-retry warnings to the
       operator instead of only stderr.
 - [ ] Phase 3: run browser — list/load stored runs, overlay cuts, export.
+- [ ] **Additional instruments — the instrument plane.** Drive more than the VNA
+      and the tower: B205minis, X310s, the AWG, and the PA. Designed but not
+      built; see `project/instrument-plane_DESIGN.md` for the roles model
+      (Source / Receiver / Positioner), the ZMQ contract for SDR control, and
+      the three constraints that need designing in from the start — socket types
+      split by guarantee, gated capture rather than free-running, and a deadman
+      on transmit.
+      - [ ] **First, the RF-off invariant.** A PA wants what the axis already
+            has: off on every exit path, before the axis stop, with a `rigcheck`
+            scenario holding it there. Worth building before any of the
+            measurement work.
+      - [ ] Answer the open questions at the foot of the design note — PA
+            control interface, X310 daughterboards, B205 clocking, and which
+            measurement is wanted first. They change what gets built.
 - [ ] Teach the simulator to replay `thru_run/pattern.csv` for real data shapes.
 - [ ] Confirm continuous / non-continuous mode on the front panel before any run
       with a cable routed through the tower.
