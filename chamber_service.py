@@ -469,6 +469,16 @@ class ChamberService:
             self.log("warn", "scan", str(e))
             self.push({"type": "scan_done", "name": name, "cancelled": True})
         except Exception as e:
+            # Stop the axis before reporting the failure. seek() can raise with
+            # the tower still turning - a dropped poll, a rejected command -
+            # and the worker thread exiting is not a reason to leave it that
+            # way: nothing else will halt it until a human notices and presses
+            # STOP. Same invariant the CLI holds in its finally block.
+            try:
+                with self._lock:
+                    self.backend.stop()
+            except Exception:
+                pass
             self.log("error", "scan", f"{type(e).__name__}: {e}")
             self.push({"type": "scan_done", "name": name, "cancelled": True,
                        "error": str(e)})

@@ -47,6 +47,65 @@ against it works unchanged on the real rig. It synthesizes an array-factor patte
 believable rate, so live position, progress and the stop button all have something
 real to exercise.
 
+### Checking the drivers
+
+`rigcheck.py` runs the acquisition drivers against fake instruments that
+impersonate pyvisa, so `Vna` and `Positioner` execute unmodified:
+
+```bash
+python rigcheck.py                 # every scenario, PASS/FAIL
+python rigcheck.py split_reply     # one scenario, verbose
+```
+
+This is a different kind of fake from `--sim`. `SimBackend` synthesizes a
+finished pattern, which means it never runs the driver code at all — every fix
+that hardware contact forced into `pattern_measure.py` had nothing checking it.
+`mock_instruments.py` fakes one layer lower and can misbehave on cue, so the
+retry-after-resync, the split-reply guard, the motion-start grace period and
+the trigger-state restore are all exercised. The faults are the rig's own:
+
+| Scenario | Reproduces |
+|---|---|
+| `split_reply` | a corrupted byte splitting `255.0 DEGREES` into `2` + `55.0 DEGREES` |
+| `split_unguarded` | the same fault with the guard removed — proves the guard matters |
+| `error_retry` | a provably valid `SK` rejected with `ERROR 1` mid-scan |
+| `error_persistent` | a link that is genuinely broken, where retrying cannot help |
+| `never_moves` | a seek that did not take — wrong prefix, wrong mnemonic, dead axis |
+| `stuck` / `late_start` | a jammed axis, and a card slow to report motion |
+| `short_sweep` / `drop_sweep` | a truncated trace, and a sweep that times out |
+| `sweep_time` | firmware 26.3.1 answering `SENS:SWE:TIME?` with −110, then silence |
+| `trigger_restore` | the VNA being handed back out of bus-trigger hold |
+| `service_stops` | the dashboard's scan worker failing mid-move |
+
+`split_unguarded` is the one worth understanding. It neuters the position guard
+and asserts the run *is* corrupted — without it, `split_reply` would pass even
+if the guard were deleted, and a test that passes either way is not a test.
+
+### Before the first run on new hardware
+
+`rigcheck.py` proves the state machine but cannot prove the protocol
+assumptions — the fakes encode the same assumptions the drivers do.
+`bringup.py` is the other half. It talks to the real instruments one at a time
+in increasing order of consequence:
+
+```bash
+python bringup.py --pos ASRL16::INSTR --slot 1 --device A
+python bringup.py --mock                      # exercise the script itself
+```
+
+Stages 0–4 are read-only; **5 and 6 turn the tower and need `--allow-motion`**.
+This rig's command set is already verified and recorded in `PositionerCmds`, so
+most stages confirm rather than discover — the point is to notice drift on a
+firmware change or a second card. `--probe` tries other serial framings and
+slot/device prefixes when the card is silent, which is how 115200 8N1 was found
+in the first place.
+
+**Stage 4 is the one to reach for when nothing is obviously broken.** It hammers
+the position query and reports an error rate, deliberately raw rather than
+through `Positioner._q` — the driver's resync-and-retry is exactly what would
+hide a degrading link. That turns the open FTDI question into a number you can
+compare between cables.
+
 `uicheck.py` drives the built dashboard against that simulator in headless
 Chromium and asserts on what the page shows rather than on what the service sent:
 
@@ -154,6 +213,12 @@ in simulation mode.
 - The dashboard's STOP is always enabled and preempts a move in progress; the service
   cancels via a flag the scan worker polls rather than writing to the port from a
   second thread.
+- **Every failure path stops the axis before releasing the port.** Both entry points
+  used to leave this to chance: the CLI stopped only on `KeyboardInterrupt`, and the
+  service's worker logged the error and returned. An exception raised inside `seek()`'s
+  wait loop arrives with the tower still turning, and closing the port first discards
+  the only means of stopping it. `rigcheck.py`'s `drop_sweep` and `service_stops`
+  scenarios hold both paths to it.
 
 ## Link reliability
 
@@ -177,6 +242,9 @@ suspect cable, hub, or RF pickup rather than the software.
 | `chamber_service.py` | WebSocket service (port 8766), hardware + simulated backends |
 | `frontend/` | Vite + Plotly dashboard |
 | `uicheck.py` | Browser check: drives the built dashboard against `--sim` |
+| `rigcheck.py` | Driver check: 17 fault scenarios against fake instruments |
+| `bringup.py` | Staged hardware bring-up; read-only until `--allow-motion` |
+| `mock_instruments.py` | pyvisa stand-ins that misbehave on cue |
 | `runs/` | Dashboard scan output; each `meta.json` records `mode` as `hw` or `sim` |
 | `thru_run/` | Thru-line reference measurement, 72 angles × 101 freqs |
 | `project/usafa-chamber_PROJECT.md` | Detailed status, decisions, and open items |
