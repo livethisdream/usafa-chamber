@@ -577,6 +577,15 @@ def build_backend(a) -> Any:
         b = HardwareBackend(a.vna, a.pos, a.slot, a.device)
         print(f"backend: hardware\n  VNA {b.vna_idn()}\n  POS {b.pos_idn()}")
         return b
+    except pm.InstrumentUnavailable as e:
+        # These carry an instruction, not just a status code. Print the
+        # instruction; a stack trace here buries the one line worth reading.
+        print(f"backend: {e}", file=sys.stderr)
+        if a.no_fallback:
+            raise SystemExit(2)
+        print("backend: falling back to SIMULATED - pass --no-fallback to refuse",
+              file=sys.stderr)
+        return SimBackend()
     except Exception as e:
         if a.no_fallback:
             raise
