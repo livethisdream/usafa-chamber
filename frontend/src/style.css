@@ -125,6 +125,14 @@ h1, h2, h3 { font-family: 'Outfit', 'Inter', sans-serif; }
 .status-pill[data-mode="hardware"] { color: var(--success); border-color: rgba(16,185,129,.4); background: rgba(16,185,129,.1); }
 .status-pill.moving { color: var(--warn); border-color: rgba(245,158,11,.4); background: rgba(245,158,11,.1); }
 .status-pill.scanning { color: var(--secondary); border-color: rgba(0,136,209,.45); background: rgba(0,136,209,.12); }
+/* chamber-specific: error-correction state. Uncalibrated is a warning, not an
+   error - the run is still valid data, it just is not a calibrated measurement. */
+.status-pill.corr-on { color: var(--success); border-color: rgba(16,185,129,.4); background: rgba(16,185,129,.1); }
+.status-pill.corr-off { color: var(--warn); border-color: rgba(245,158,11,.45); background: rgba(245,158,11,.12); }
+.status-pill.corr-unknown { color: var(--text-muted); }
+/* .status-pill sets display, which outranks the UA sheet's [hidden] rule -
+   without this the badge stays on screen after JS hides it. */
+.status-pill[hidden] { display: none; }
 
 .btn {
   padding: 0.42rem 0.8rem;

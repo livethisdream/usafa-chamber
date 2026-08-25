@@ -213,6 +213,19 @@ class Vna:
             except pyvisa.VisaIOError:
                 pass
 
+    def correction_state(self) -> str:
+        """Error-correction state: '1' when a calibration is applied, '0' when not.
+
+        Returns '?' rather than raising. This is metadata about a run, not a
+        precondition for it - an instrument that will not answer should leave
+        the record honestly unknown rather than abort a scan that would
+        otherwise be fine. The caller decides what an unknown is worth.
+        """
+        try:
+            return self.io.query(f"SENS{self.ch}:CORR:STAT?").strip()
+        except (pyvisa.VisaIOError, ValueError):
+            return "?"
+
     def frequencies(self) -> np.ndarray:
         raw = self.io.query(f"SENS{self.ch}:FREQ:DATA?")
         return np.fromstring(raw, sep=",")
@@ -446,6 +459,23 @@ class Positioner:
             pass
 
 
+def correction_is_on(state: str | None) -> bool | None:
+    """True / False / None-for-unknown, from a CORR:STAT? reply.
+
+    Three states, not two. An instrument that did not answer is not the same
+    as one that answered "off", and a run recorded as uncalibrated when the
+    query merely timed out would be thrown away for no reason.
+    """
+    if state is None:
+        return None
+    s = str(state).strip().upper()
+    if s in ("1", "+1", "ON", "TRUE"):
+        return True
+    if s in ("0", "+0", "OFF", "FALSE"):
+        return False
+    return None
+
+
 def _wrap180(x: float) -> float:
     return (x + 180.0) % 360.0 - 180.0
 
@@ -635,6 +665,17 @@ def main(argv=None) -> int:
             print(f"      {vcfg.points} pts, {vcfg.start_hz/1e9:.3f}-{vcfg.stop_hz/1e9:.3f} GHz, "
                   f"IFBW {vcfg.if_bw_hz:.0f} Hz, {sweep_txt}")
             sweep_s = sweep_s or 0.0
+
+            # Worth knowing before the tower turns, not after the run is on disk.
+            corr = vna.correction_state()
+            on = correction_is_on(corr)
+            if on is False:
+                print(f"      error correction OFF ({corr!r}) - THIS RUN IS "
+                      f"UNCALIBRATED", file=sys.stderr)
+            elif on is None:
+                print(f"      error correction unknown ({corr!r})", file=sys.stderr)
+            else:
+                print(f"      error correction on ({corr})")
 
         pos = Positioner(rm, pcfg, cmds)
         if pcfg.speed_percent is not None:

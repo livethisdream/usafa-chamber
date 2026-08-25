@@ -63,6 +63,8 @@ class Faults:
     drop_sweep: int | None = None        # VI_ERROR_TMO on the Nth data read
     short_sweep: int | None = None       # truncate the Nth sweep, once
     sweep_time_dies: bool = True         # emulate the A2202-Fx's -110 on SWE:TIME?
+    correction_off: bool = False         # report an uncalibrated instrument
+    correction_mute: bool = False        # refuse to answer CORR:STAT? at all
 
 
 @dataclass
@@ -152,7 +154,9 @@ class FakeVna:
         if "SYST:ERR?" in c:
             return '0,"No error"\n'
         if "CORR:STAT?" in c:
-            return "1\n"
+            if self.s.faults.correction_mute:
+                raise pyvisa.VisaIOError(VI_ERROR_TMO)
+            return ("0\n" if self.s.faults.correction_off else "1\n")
         if c.startswith("TRIG:SOUR?"):
             return self.trig_source + "\n"
         if c.startswith("INIT") and ":CONT?" in c:

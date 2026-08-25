@@ -129,6 +129,14 @@ def main(argv=None) -> int:
             check("connects to service", page.inner_text("#mode-badge") == "SIMULATED",
                   page.inner_text("#vna-idn"))
 
+            # Correction state, in sim. There is no calibration behind a
+            # synthesized pattern, so the badge must stay down rather than show
+            # a green CAL the numbers do not deserve.
+            check("sim claims no calibration",
+                  "n/a" in page.inner_text("#vna-corr")
+                  and page.locator("#corr-badge").is_hidden(),
+                  page.inner_text("#vna-corr"))
+
             # System theme is the default, and the page starts on whatever the
             # browser reports. Assert that before touching the button.
             check("follows system theme",

@@ -278,6 +278,53 @@ def s_trigger_restored():
     return {}, COMMON + ["--step", "180", "--to-deg", "180"]
 
 
+def s_uncalibrated():
+    # A VNA with no calibration applied. The run is still a run - this asserts
+    # the operator is told, not that the scan is refused.
+    return ({"correction_off": True},
+            COMMON + ["--step", "90", "--to-deg", "355"])
+
+
+def check_uncalibrated(r, outdir):
+    assert r["rc"] == 0, f"exit {r['rc']}: {r['exc']}"
+    assert "THIS RUN IS UNCALIBRATED" in r["err"], (
+        "correction was off and nothing said so")
+    assert _angles(outdir) == [0.0, 90.0, 180.0, 270.0], (
+        "the warning aborted a scan that should have run anyway")
+    return "correction OFF reported, scan completed regardless"
+
+
+def s_correction_mute():
+    # The instrument refuses to answer CORR:STAT?. Unknown is not "off", and
+    # neither is a reason to lose the run.
+    return ({"correction_mute": True},
+            COMMON + ["--step", "180", "--to-deg", "180"])
+
+
+def check_correction_mute(r, outdir):
+    assert r["rc"] == 0, f"exit {r['rc']}: {r['exc']}"
+    assert "correction unknown" in r["err"], (
+        "an unanswered CORR:STAT? was not reported as unknown")
+    assert "UNCALIBRATED" not in r["err"], (
+        "silence was reported as an uncalibrated instrument")
+    return "unanswered query degraded to unknown, run kept"
+
+
+def s_meta_records_correction():
+    # The service path: whatever the state was, meta.json has to carry it, or
+    # a finished run cannot say whether it was calibrated.
+    return ({"correction_off": True, "_target": "service"}, ["--step", "90"])
+
+
+def check_meta_records_correction(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    meta = json.loads((outdir / "meta.json").read_text())
+    assert meta.get("correction_state") == "0", (
+        f"meta.json recorded correction_state={meta.get('correction_state')!r}, "
+        f"not the '0' the instrument reported")
+    return "meta.json records the uncalibrated state of the run"
+
+
 SCENARIOS = [
     ("nominal", s_nominal, check_nominal),
     ("endpoint", s_endpoint, check_endpoint),
@@ -296,6 +343,9 @@ SCENARIOS = [
     ("sweep_time", s_sweep_time_unsupported, check_sweep_time_unsupported),
     ("trigger_restore", s_trigger_restored, check_trigger_restored),
     ("service_stops", s_service_stops, check_service_stops),
+    ("uncalibrated", s_uncalibrated, check_uncalibrated),
+    ("correction_mute", s_correction_mute, check_correction_mute),
+    ("meta_correction", s_meta_records_correction, check_meta_records_correction),
 ]
 
 

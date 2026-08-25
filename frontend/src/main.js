@@ -22,6 +22,7 @@ const $ = (id) => document.getElementById(id);
 const state = {
     connected: false,
     scanning: false,
+    mode: null,
     angles: [],
     freqs: [],
     grid: [],
@@ -350,17 +351,73 @@ function setConnected(on) {
     if (!on) {
         $('mode-badge').textContent = 'offline';
         $('mode-badge').removeAttribute('data-mode');
+        $('corr-badge').hidden = true;
+        $('vna-corr').textContent = '—';
     }
     syncControls();
+}
+
+/**
+ * Read a CORR:STAT? reply the way acquisition-side `correction_is_on` does:
+ * true / false / null-for-unknown. An instrument that did not answer is not
+ * the same as one that answered "off".
+ */
+function correctionIsOn(raw) {
+    if (raw == null) return null;
+    const s = String(raw).trim().toUpperCase();
+    if (s === '1' || s === '+1' || s === 'ON' || s === 'TRUE') return true;
+    if (s === '0' || s === '+0' || s === 'OFF' || s === 'FALSE') return false;
+    return null;
+}
+
+/**
+ * Show whether the VNA is running against a calibration.
+ *
+ * Deliberately not an error state. An uncalibrated sweep is still a sweep, and
+ * plenty of alignment work is done with correction off on purpose - so this
+ * warns, in the corner, and never blocks. In sim there is no calibration to
+ * report at all: the backend says so with "n/a" and the badge stays down
+ * rather than inventing a green light behind synthesized data.
+ */
+function setCorrection(raw, mode) {
+    const on = correctionIsOn(raw);
+    const kv = $('vna-corr');
+    const badge = $('corr-badge');
+    if (!kv || !badge) return;
+
+    if (mode === 'sim' || raw == null || raw === '' || raw === 'n/a') {
+        kv.textContent = mode === 'sim' ? 'n/a (simulated)' : '—';
+        badge.hidden = true;
+        return;
+    }
+    badge.hidden = false;
+    if (on === true) {
+        kv.textContent = `on (${raw})`;
+        badge.textContent = 'CAL';
+        badge.className = 'status-pill corr-on';
+        badge.title = 'error correction on - this run is calibrated';
+    } else if (on === false) {
+        kv.textContent = `OFF (${raw})`;
+        badge.textContent = 'UNCAL';
+        badge.className = 'status-pill corr-off';
+        badge.title = 'error correction off - this run is uncalibrated';
+    } else {
+        kv.textContent = `unknown (${raw})`;
+        badge.textContent = 'CAL?';
+        badge.className = 'status-pill corr-unknown';
+        badge.title = 'the VNA did not answer SENS:CORR:STAT?';
+    }
 }
 
 function applyState(s) {
     if (!s) return;
     $('mode-badge').textContent = s.mode === 'sim' ? 'SIMULATED' : 'HARDWARE';
     $('mode-badge').dataset.mode = s.mode;
+    state.mode = s.mode;
     $('vna-idn').textContent = s.vna_idn || '—';
     $('pos-idn').textContent = s.pos_idn || '—';
     $('pos-err').textContent = s.latched_error ?? '—';
+    setCorrection(s.correction, s.mode);
     if (s.angle != null) setPosition(s.angle);
     if (s.speed != null) $('speed-readout').textContent = `${s.speed.toFixed(0)}%`;
     if (s.error) addLog('error', 'state', s.error);
@@ -436,6 +493,7 @@ const transport = createTransport({
     onPosition: (deg) => setPosition(deg),
     onScanStarted: (m) => {
         state.scanning = true;
+        setCorrection(m.correction, state.mode);
         state.angles = m.angles;
         state.freqs = m.freqs;
         state.grid = new Array(m.angles.length).fill(null);

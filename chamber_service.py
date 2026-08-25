@@ -111,6 +111,11 @@ class SimBackend:
     def latched_error(self) -> str:
         return "0"
 
+    def correction_state(self) -> str:
+        # Not "1". There is no calibration behind a synthesized pattern, and
+        # saying otherwise would write a lie into meta.json.
+        return "n/a"
+
     # -- control ------------------------------------------------------------
     def set_speed(self, pct: float) -> None:
         self._speed = float(pct)
@@ -216,6 +221,9 @@ class HardwareBackend:
     def latched_error(self) -> str:
         return self.pos.latched_error()
 
+    def correction_state(self) -> str:
+        return self.vna.correction_state()
+
     def set_speed(self, pct: float) -> None:
         self.pos.set_speed(pct)
 
@@ -307,6 +315,7 @@ class ChamberService:
                 "angle": round(self.backend.position(), 2),
                 "speed": round(self.backend.speed(), 1),
                 "latched_error": self.backend.latched_error(),
+                "correction": self.backend.correction_state(),
                 "connected": True,
             })
         except Exception as e:
@@ -415,10 +424,23 @@ class ChamberService:
             with self._lock:
                 self.backend.configure(req)
                 freqs = self.backend.frequencies()
+                correction = self.backend.correction_state()
+
+            # Read after configure, because configuring the sweep is what can
+            # invalidate a calibration. Said now rather than at the end: a
+            # 72-point run is minutes long, and an uncalibrated one is minutes
+            # wasted if nobody noticed until the file was written.
+            corr_on = pm.correction_is_on(correction)
+            if corr_on is False:
+                self.log("warn", "vna", f"error correction is OFF ({correction}) "
+                                        f"- this run will be uncalibrated")
+            elif corr_on is None and self.backend.mode != "sim":
+                self.log("warn", "vna", f"error correction state unknown "
+                                        f"({correction})")
 
             self.push({"type": "scan_started", "name": name,
                        "angles": angles.tolist(), "freqs": freqs.tolist(),
-                       "params": req.__dict__})
+                       "params": req.__dict__, "correction": correction})
             self.log("info", "scan", f"{name}: {angles.size} angles, "
                                      f"{freqs.size} freqs")
 
@@ -458,7 +480,11 @@ class ChamberService:
             meta = {"name": name, "params": req.__dict__,
                     "n_angles": int(angles.size), "n_freqs": int(freqs.size),
                     "finished": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "mode": self.backend.mode}
+                    "mode": self.backend.mode,
+                    # Without this a finished run cannot say whether it was
+                    # calibrated, which makes two runs incomparable and neither
+                    # of them trustworthy on its own.
+                    "correction_state": correction}
             (outdir / "meta.json").write_text(json.dumps(meta, indent=2))
             self.last_run = meta
             self.push({"type": "scan_done", "name": name, "cancelled": False,
