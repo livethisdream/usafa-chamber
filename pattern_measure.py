@@ -34,6 +34,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import pyvisa
@@ -86,6 +87,52 @@ class PositionerCmds:
     @property
     def prefix(self) -> str:
         return f"{self.slot}{self.device}:"
+
+
+@dataclass
+class AcmCmds:
+    """Copper Mountain AutoCal (ACM2202) mnemonics, in one place.
+
+    NOTHING HERE IS VERIFIED. Unlike PositionerCmds, which carries a dated
+    read-only probe against real firmware, every mnemonic below is a reading of
+    CMT's published command index and has not been seen to answer on this rig's
+    S2VNA 26.3.1. `bringup.py --acm` exists to settle that, read-only.
+
+    Two things worth knowing before reaching for the manual:
+
+    * CMT documents automatic calibration under **ECal** mnemonics, not `ACM`.
+      Searching for "ACM" finds the product page and nothing else.
+    * The module is a USB device on the PC running S2VNA, not on the VNA. That
+      the software drives it from its own GUI does not establish that it exposes
+      it to a SCPI client, which is the single question the probe answers.
+
+    Centralized for the same reason PositionerCmds is: when this project last
+    met an instrument, four mnemonics that obviously existed returned ERROR 1,
+    and having them in one dataclass made that a ten-minute correction rather
+    than a rewrite.
+    """
+    # Full 2-port SOLT via the module. The one the chamber actually wants: a
+    # transmission measurement needs both ports corrected.
+    solt2: str = "SENS{ch}:CORR:COLL:ECAL:SOLT2 {p1:d},{p2:d}"
+    solt1: str = "SENS{ch}:CORR:COLL:ECAL:SOLT1 {p1:d}"
+    # Orientation: which module port is on which VNA port. May be implicit in
+    # SOLT2 on modules that auto-orient; issued only when `orient` is asked for.
+    orient: str = "SENS{ch}:CORR:COLL:ECAL:ORI:EXEC"
+    confidence: str = "SENS{ch}:CORR:COLL:ECAL:CCH"
+    unknown_thru: str = "SENS{ch}:CORR:COLL:ECAL:UTHR:STAT {state}"
+    # Characterization data. Long, and read here only as a presence test - if
+    # this answers at all, the software can see a module.
+    module_data: str = "SYST:COMM:ECAL:DATA?"
+    # Discard a half-collected calibration. Issued on every exit path.
+    clear: str = "SENS{ch}:CORR:COLL:CLE"
+    query_state: str = "SENS{ch}:CORR:STAT?"    # verified 2026-08-20
+
+    port1: int = 1
+    port2: int = 2
+    # A 2-port cal is many sweeps, not one. The instrument default of 120 s is
+    # generous for a sweep and tight for this; a timeout landing mid-cal is
+    # precisely the state worth not reaching.
+    timeout_ms: int = 600_000
 
 
 @dataclass
@@ -145,13 +192,15 @@ class Aborted(Exception):
 
 
 class Vna:
-    def __init__(self, rm: pyvisa.ResourceManager, cfg: VnaConfig):
+    def __init__(self, rm: pyvisa.ResourceManager, cfg: VnaConfig,
+                 acm: "AcmCmds | None" = None):
         self.cfg = cfg
         self.io = rm.open_resource(cfg.resource)
         self.io.timeout = cfg.timeout_ms
         self.io.read_termination = "\n"
         self.io.write_termination = "\n"
         self.ch = cfg.channel
+        self.acm = acm or AcmCmds()
         self._restore: dict[str, str] = {}
 
     def idn(self) -> str:
@@ -225,6 +274,87 @@ class Vna:
             return self.io.query(f"SENS{self.ch}:CORR:STAT?").strip()
         except (pyvisa.VisaIOError, ValueError):
             return "?"
+
+    # -- automatic calibration module (ACM2202) -----------------------------
+    # Everything below speaks AcmCmds, which is unverified. See its docstring.
+
+    def acm_module(self) -> str | None:
+        """Identify the AutoCal module, or None when the software cannot see one.
+
+        A presence test, not a data read: the characterization array is long and
+        nothing here wants it, so only its first field is kept. Read with a short
+        timeout, because an unsupported header on this firmware answers -110 and
+        then goes quiet - the SENS:SWE:TIME? failure mode.
+        """
+        saved, self.io.timeout = self.io.timeout, 5_000
+        try:
+            raw = self.io.query(self.acm.module_data).strip()
+        except (pyvisa.VisaIOError, ValueError):
+            return None
+        finally:
+            self.io.timeout = saved
+            try:
+                self.io.query("SYST:ERR?")
+            except pyvisa.VisaIOError:
+                pass
+        return raw.split(",")[0].strip() or None
+
+    def acm_clear(self) -> None:
+        """Discard any half-collected calibration.
+
+        Never raises. This is the cleanup path, called from `finally` blocks on
+        failure and cancellation, and a cleanup that can itself throw turns one
+        problem into two.
+        """
+        try:
+            self.io.write(self.acm.clear.format(ch=self.ch))
+        except pyvisa.VisaIOError:
+            pass
+
+    def acm_calibrate(self, ports: tuple[int, int] | None = None,
+                      orient: bool = False,
+                      on_step: "Callable[[str], None] | None" = None) -> str:
+        """Run a 2-port AutoCal and return the resulting correction state.
+
+        Blocks for the whole procedure. There is no progress to poll and no
+        point to cancel at: the module runs short/open/load/thru inside one SCPI
+        command, so `on_step` reports what is *about* to happen rather than
+        pretending to track it. A caller wanting to cancel can only decline to
+        issue the next command - which is why the service's button says "stop
+        after this step" rather than "abort".
+
+        The collection buffer is cleared on every failing exit path. Leaving a
+        VNA half-collected is the calibration equivalent of walking away from a
+        turning tower.
+        """
+        a = self.acm
+        p1, p2 = ports or (a.port1, a.port2)
+        saved, self.io.timeout = self.io.timeout, a.timeout_ms
+        try:
+            if orient:
+                if on_step:
+                    on_step("orienting the module to the ports")
+                self.io.write(a.orient.format(ch=self.ch))
+                self.io.query("*OPC?")
+            if on_step:
+                on_step(f"2-port AutoCal on ports {p1} and {p2}")
+            self.io.write(a.solt2.format(ch=self.ch, p1=p1, p2=p2))
+            self.io.query("*OPC?")
+        except BaseException:
+            self.acm_clear()
+            raise
+        finally:
+            self.io.timeout = saved
+        self._check_errors("after AutoCal")
+        state = self.correction_state()
+        if not correction_is_on(state):
+            # The command returned and correction is still off. Something was
+            # collected and not applied; do not leave that sitting there.
+            self.acm_clear()
+            raise RuntimeError(
+                f"AutoCal completed but correction is {state!r}, not on - "
+                f"nothing was applied")
+        return state
 
     def frequencies(self) -> np.ndarray:
         raw = self.io.query(f"SENS{self.ch}:FREQ:DATA?")

@@ -145,7 +145,7 @@ roughly 0.03 dB of angular structure, a real measurement is showing signal.
 `--sim`. Both backends verified, including STOP preempting a live scan.
 `HardwareBackend` verified read-only against the rig.
 
-**The drivers are now under test.** `rigcheck.py` runs 17 scenarios against
+**The drivers are now under test.** `rigcheck.py` runs 28 scenarios against
 `mock_instruments.py`, which impersonates pyvisa so `Vna` and `Positioner` execute
 unmodified — the `--sim` backend never touched them, so until now every fix from
 bring-up was resting on a single manual verification. Each fault is one the rig
@@ -154,6 +154,23 @@ unsupported `SENS:SWE:TIME?`. The FTDI corruption can now be reproduced on deman
 with no cable involved, which is the closest thing to a handle on that open
 concern. One scenario, `split_unguarded`, deletes the guard and asserts the run
 breaks — otherwise the guarded case would pass even with the guard gone.
+
+**Calibration state, and the ACM2202.** A run now records whether it was
+calibrated. `SENS:CORR:STAT?` is read on both entry points *after* the sweep is
+configured — configuring is what invalidates a cal — reported before the tower
+turns, and written into `meta.json`. Three states, not two: an instrument that
+did not answer is not one that answered "off", and a run thrown away as
+uncalibrated because a query timed out is a run thrown away for nothing. The sim
+backend reports `"n/a"` rather than `"1"`, because there is no calibration behind
+a synthesized pattern.
+
+On top of that, dashboard-driven calibration with the **ACM2202** is built but
+**unverified end to end**: the wizard, the exclusivity, the record
+(`runs/calibration/cal.json`, copied into each run's `meta.json`) and the
+sweep-mismatch warning all work against the fakes, and none of the AutoCal SCPI
+has been seen to answer on this firmware. Mnemonics are centralized in `AcmCmds`
+and `bringup.py` stage 7 probes them read-only. Design and open questions:
+`project/acm-calibration_DESIGN.md`.
 
 **Open concerns:**
 - *FTDI link corruption.* One 72-point run logged 3 `ERROR 1` retries and 2 split
@@ -169,6 +186,11 @@ breaks — otherwise the guarded case would pass even with the guard gone.
   exercised the reuse path, and the hardware half has never seen a healthy
   connected rig or a genuine problem-code-28 device.
 - *VNA left on 2–3 GHz / 101 pts / S21*, not its original 100 kHz–22 GHz S11 sweep.
+- *AutoCal may not be exposed to SCPI at all.* The ACM2202 is a USB device on the
+  PC running S2VNA, not on the VNA. That the software drives it from its own GUI
+  does not establish that it exposes it to a socket client. Stage 7 answers this;
+  if the answer is no, the wizard becomes a guided manual procedure that records
+  the same `cal.json`, which is most of the value anyway.
 
 # ToDo
 
@@ -189,6 +211,10 @@ breaks — otherwise the guarded case would pass even with the guard gone.
             from a normal checkout.
       - [ ] The archived lineage's `reference.js` still carries the un-clamped
             comparison metric. Only matters if anyone revives it.
+- [ ] **Run `bringup.py` stage 7 at the chamber** and correct `AcmCmds` from what
+      actually answers. Then mate the module and try one real 2-port AutoCal. The
+      rest of the calibration feature is already built and tested against fakes;
+      this is the only step that needs the rig.
 - [ ] Chase the FTDI link corruption physically — different cable, no hub, check
       routing relative to the VNA and chamber feed. `bringup.py` stage 4 now
       measures the error rate over N raw position reads, so each change is a

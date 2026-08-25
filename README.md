@@ -76,6 +76,14 @@ the trigger-state restore are all exercised. The faults are the rig's own:
 | `sweep_time` | firmware 26.3.1 answering `SENS:SWE:TIME?` with −110, then silence |
 | `trigger_restore` | the VNA being handed back out of bus-trigger hold |
 | `service_stops` | the dashboard's scan worker failing mid-move |
+| `uncalibrated` / `correction_mute` | a VNA with correction off, and one that will not say |
+
+The `cal_*` scenarios are a different kind of thing and are labelled as such in
+the file: no calibration has ever been run through this path, so they pin the
+*design* — exclusivity in both directions, a cancel that only claims what it can
+do, a cleared collection buffer on every failing exit, and a run that says when
+its sweep no longer matches the calibration. Those survive the ACM mnemonics
+turning out to be wrong, which they may well.
 
 `split_unguarded` is the one worth understanding. It neuters the position guard
 and asserts the run *is* corrupted — without it, `split_reply` would pass even
@@ -93,7 +101,11 @@ python bringup.py --pos ASRL16::INSTR --slot 1 --device A
 python bringup.py --mock                      # exercise the script itself
 ```
 
-Stages 0–4 are read-only; **5 and 6 turn the tower and need `--allow-motion`**.
+Stages 0–4 and 7 are read-only; **5 and 6 turn the tower and need
+`--allow-motion`**. Stage 7 probes for the ACM2202 AutoCal module and never runs
+a calibration: it asks whether the software can see a module, and tests whether
+the AutoCal headers exist by sending them with their parameters missing and
+reading the error queue, which cannot execute anything.
 This rig's command set is already verified and recorded in `PositionerCmds`, so
 most stages confirm rather than discover — the point is to notice drift on a
 firmware change or a second card. `--probe` tries other serial framings and
@@ -133,7 +145,37 @@ The chrome follows [`livethisdream/phaser`](https://github.com/livethisdream/pha
   page with it, until someone picks a side.
 
 Start scan and **STOP** sit in the tab header rather than in the accordion, because
-STOP must never be a scroll away.
+STOP must never be a scroll away. A **CAL / UNCAL** pill sits beside them whenever
+the VNA will say: an uncalibrated run is valid data and is never blocked, but it
+should not be possible to take one without noticing.
+
+### Calibration
+
+The VNA section carries the last calibration and a **Calibrate…** button that
+opens a wizard rather than starting anything. Running an AutoCal with the ACM2202
+means somebody walks into the chamber, unmates the horn and the AUT, mates the
+module across the cable ends and comes back out — so the modal states the sweep it
+will calibrate at, asks which reference plane is being calibrated (nothing in the
+data distinguishes the cable ends from the front panel afterwards, and the
+difference is every dB of cable loss), takes an explicit acknowledgement, and ends
+by reminding the operator to put the antennas back.
+
+Cancel means *stop after the current step*, and says so on the button. An AutoCal
+runs the whole short/open/load/thru sequence inside one instrument command; there
+is nowhere to poll and nothing to interrupt, and a button that claimed otherwise
+would be worse than no button.
+
+Each calibration writes `runs/calibration/cal.json`, and every run copies that
+record into its own `meta.json` — copied rather than referenced, because the next
+calibration overwrites the file and a finished run has to keep saying what it was
+taken against. A run set up at a different span, point count, IF bandwidth or
+power than the calibration is flagged in the panel and warned about in the log:
+correction interpolated across a span it never measured is a plausible-looking
+answer of unknown quality.
+
+**None of the AutoCal SCPI is verified.** It is centralized in `AcmCmds` for the
+same reason `PositionerCmds` exists, and `bringup.py`'s stage 7 is what settles
+it. See `project/acm-calibration_DESIGN.md`.
 
 The Turntable tab draws the axis: commanded against reported, and which points on
 the grid are measured. It is canvas rather than Plotly (`frontend/src/dial.js`) —
@@ -242,13 +284,14 @@ suspect cable, hub, or RF pickup rather than the software.
 | `chamber_service.py` | WebSocket service (port 8766), hardware + simulated backends |
 | `frontend/` | Vite + Plotly dashboard |
 | `uicheck.py` | Browser check: drives the built dashboard against `--sim` |
-| `rigcheck.py` | Driver check: 17 fault scenarios against fake instruments |
+| `rigcheck.py` | Driver check: 28 fault scenarios against fake instruments |
 | `bringup.py` | Staged hardware bring-up; read-only until `--allow-motion` |
 | `mock_instruments.py` | pyvisa stand-ins that misbehave on cue |
 | `runs/` | Dashboard scan output; each `meta.json` records `mode` as `hw` or `sim` |
 | `thru_run/` | Thru-line reference measurement, 72 angles × 101 freqs |
 | `project/usafa-chamber_PROJECT.md` | Detailed status, decisions, and open items |
 | `project/instrument-plane_DESIGN.md` | Design note: driving SDRs, the AWG and the PA (not built) |
+| `project/acm-calibration_DESIGN.md` | Design note: ACM2202 calibration from the dashboard |
 
 Venvs live outside the tree because this project sits under OneDrive — `.venv-win`
 is a junction and `.venv-linux` a symlink. See `/setup-dual-venv`.

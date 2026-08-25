@@ -34,6 +34,7 @@ Usage:
 from __future__ import annotations
 
 import math
+import time
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -65,6 +66,16 @@ class Faults:
     sweep_time_dies: bool = True         # emulate the A2202-Fx's -110 on SWE:TIME?
     correction_off: bool = False         # report an uncalibrated instrument
     correction_mute: bool = False        # refuse to answer CORR:STAT? at all
+    # -- AutoCal module (ACM2202) -----------------------------------------
+    # Unlike the faults above, these do not reproduce anything observed: no
+    # calibration has ever been run through this path. They model what the
+    # design has to survive, and the happy path they model is itself a guess
+    # at what the instrument does. See AcmCmds.
+    acm_present: bool = True             # software can see a module at all
+    acm_headers_known: bool = True       # False = -110 and silence, as SWE:TIME? does
+    acm_fails: bool = False              # the cal command errors part-way through
+    acm_no_apply: bool = False           # cal returns, correction still off
+    acm_seconds: float = 0.0             # make the cal take real time, for cancel
 
 
 @dataclass
@@ -79,6 +90,8 @@ class State:
     short_done: bool = False
     split_done: bool = False
     trigger_restored: bool = False
+    cals: list = field(default_factory=list)     # commands the cal path issued
+    collection_cleared: int = 0                  # CORR:COLL:CLE issue count
 
 
 class FakeVna:
@@ -99,6 +112,14 @@ class FakeVna:
         # BUS by a run, and a scenario asserts that these come back.
         self.trig_source = "INT"
         self.init_cont = "1"
+        # Correction starts wherever the fault says, and a successful AutoCal
+        # turns it on - so a scenario can prove the cal did something rather
+        # than that the mock always answered "1".
+        self.corrected = not state.faults.correction_off
+        # SYST:ERR? is a queue of one here. Only the AutoCal header probe
+        # latches anything; everything else leaves it clean, as the real
+        # instrument does on the commands this project sends.
+        self.err = '0,"No error"'
 
     # -- helpers ----------------------------------------------------------
     def _freqs(self) -> np.ndarray:
@@ -115,6 +136,35 @@ class FakeVna:
         mag = 10.0 ** ((env_db + tilt_db + rng.normal(0.0, 0.05, f.size)) / 20.0)
         phase = np.radians((self.pos.angle * 3.0 + np.linspace(0, 180, f.size)) % 360.0)
         return mag * np.exp(1j * phase)
+
+    # -- AutoCal ----------------------------------------------------------
+    def _autocal(self, cmd: str) -> None:
+        """Stand in for the module running short/open/load/thru.
+
+        Modelled as a single blocking write with no progress, because that is
+        what the design has to cope with - not because the instrument has been
+        seen to behave this way.
+        """
+        f = self.s.faults
+        self.s.cals.append(cmd)
+        if not f.acm_headers_known:
+            # -113 Undefined header: the software has no such command. A clean
+            # negative, and the answer that would kill this feature.
+            self.err = '-113,"Undefined header"'
+            return
+        if " " not in cmd.strip():
+            # A required-parameter header sent bare. This is how bringup probes
+            # for the command's existence without executing it: -109 says the
+            # header parsed, -113 says it does not exist.
+            self.err = '-109,"Missing parameter"'
+            return
+        if ":ORI:" in cmd or ":CCH" in cmd or ":UTHR:" in cmd:
+            return
+        if f.acm_seconds:
+            time.sleep(f.acm_seconds)
+        if f.acm_fails:
+            raise pyvisa.VisaIOError(VI_ERROR_TMO)
+        self.corrected = not f.acm_no_apply
 
     # -- pyvisa surface ---------------------------------------------------
     def write(self, cmd: str) -> None:
@@ -138,6 +188,10 @@ class FakeVna:
             self.init_cont = c.split()[-1]
         elif c.endswith("TRIG:SING"):
             self.s.sweeps += 1
+        elif ":CORR:COLL:CLE" in c:
+            self.s.collection_cleared += 1
+        elif ":CORR:COLL:ECAL" in c:
+            self._autocal(c)
 
     def query(self, cmd: str) -> str:
         c = cmd.strip()
@@ -152,11 +206,17 @@ class FakeVna:
                 raise pyvisa.VisaIOError(VI_ERROR_TMO)
             return "0.0213\n"
         if "SYST:ERR?" in c:
-            return '0,"No error"\n'
+            err, self.err = self.err, '0,"No error"'
+            return err + "\n"
         if "CORR:STAT?" in c:
             if self.s.faults.correction_mute:
                 raise pyvisa.VisaIOError(VI_ERROR_TMO)
-            return ("0\n" if self.s.faults.correction_off else "1\n")
+            return "1\n" if self.corrected else "0\n"
+        if "SYST:COMM:ECAL:DATA?" in c:
+            f = self.s.faults
+            if not (f.acm_present and f.acm_headers_known):
+                raise pyvisa.VisaIOError(VI_ERROR_TMO)
+            return "Copper Mountain Technologies,ACM2202,SIMULATED,1.0\n"
         if c.startswith("TRIG:SOUR?"):
             return self.trig_source + "\n"
         if c.startswith("INIT") and ":CONT?" in c:

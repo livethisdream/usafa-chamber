@@ -89,6 +89,9 @@
               <div class="accordion-body">
                 <div class="kv"><span>Identity</span><span id="vna-idn" class="mono">—</span></div>
                 <div class="kv"><span>Error correction</span><span id="vna-corr" class="mono">—</span></div>
+                <div class="kv"><span>Calibration</span><span id="cal-summary" class="mono">none recorded</span></div>
+                <p class="cal-warn" id="cal-drift" hidden></p>
+                <button class="btn btn-outline btn-small btn-wide" id="btn-cal" title="Run a 2-port AutoCal with the ACM2202 at the sweep settings below">Calibrate…</button>
                 <hr class="divider" />
                 <div class="field-row">
                   <div class="control-group">
@@ -367,6 +370,69 @@
         </div>
       </section>
     </main>
+  </div>
+
+
+  <!-- Calibration. A wizard rather than a button, because the procedure has a
+       person in the middle of it: somebody has to walk into the chamber and
+       mate the module before any of this can run. -->
+  <div class="modal-backdrop" id="cal-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="cal-title">
+      <div class="modal-header">
+        <h3 id="cal-title">Calibrate — 2-port AutoCal</h3>
+        <button class="btn btn-outline btn-small icon-toggle-btn" id="cal-close" aria-label="Close">×</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="cal-step" id="cal-stage-setup">
+          <p class="cal-lead">The calibration will be taken at the sweep currently set in the VNA panel:</p>
+          <div class="kv"><span>Span</span><span id="cal-span" class="mono">—</span></div>
+          <div class="kv"><span>Points / IF BW</span><span id="cal-pts" class="mono">—</span></div>
+          <div class="kv"><span>Power</span><span id="cal-pow" class="mono">—</span></div>
+          <p class="cal-note">Changing any of these afterwards invalidates the calibration. Set the sweep you intend to measure at before starting.</p>
+
+          <hr class="divider" />
+          <div class="control-group">
+            <label for="cal-plane">Reference plane</label>
+            <select class="modern-select" id="cal-plane">
+              <option>cable ends inside the chamber</option>
+              <option>instrument front panel</option>
+            </select>
+          </div>
+          <p class="cal-note">Nothing in the data distinguishes these afterwards, and the difference is every dB of cable loss in the pattern. It is written into the record because it cannot be recovered from it.</p>
+
+          <hr class="divider" />
+          <ol class="cal-checklist">
+            <li>Stop the tower and confirm nothing is scanning.</li>
+            <li>Unmate the transmit horn and the AUT from the cable ends.</li>
+            <li>Mate the ACM2202 across those two ends.</li>
+            <li>Leave the chamber and close the door.</li>
+          </ol>
+          <label class="cal-confirm"><input type="checkbox" id="cal-ack" /> The module is connected and the chamber is clear.</label>
+        </div>
+
+        <div class="cal-step" id="cal-stage-run" hidden>
+          <p class="cal-lead" id="cal-status">Starting…</p>
+          <div class="log-console cal-log" id="cal-log" aria-live="polite"></div>
+          <p class="cal-note">An AutoCal runs the whole sequence inside one instrument command, so there is nothing to poll and nothing to interrupt. Stopping takes effect after the current step finishes.</p>
+        </div>
+
+        <div class="cal-step" id="cal-stage-done" hidden>
+          <p class="cal-lead" id="cal-result">—</p>
+          <ol class="cal-checklist">
+            <li>Unmate the ACM2202.</li>
+            <li>Re-mate the transmit horn and the AUT.</li>
+            <li>Leave the chamber and close the door.</li>
+          </ol>
+          <p class="cal-note">The calibration holds while the sweep does. The panel will say so if a run is set up at different settings.</p>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-outline" id="cal-cancel">Cancel</button>
+        <button class="btn btn-primary" id="cal-go" disabled>Start calibration</button>
+      </div>
+    </div>
   </div>
 
   <script type="module" src="/src/main.js"></script>

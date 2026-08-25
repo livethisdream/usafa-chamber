@@ -42,6 +42,11 @@ import pattern_measure as pm
 
 DEFAULT_PORT = 8766          # 8765 belongs to the Phaser service; coexist with it
 RUNS_DIR = Path("runs")
+# One file, overwritten by each calibration. Runs copy it rather than pointing
+# at it: a run that references a file the next calibration overwrites is a run
+# that lies about itself. Derived from RUNS_DIR at call time, not bound at
+# import, so a caller that redirects RUNS_DIR redirects this too.
+CAL_NAME = Path("calibration/cal.json")
 
 
 # --------------------------------------------------------------------------
@@ -69,6 +74,71 @@ class ScanRequest:
     def angles(self) -> np.ndarray:
         return pm.ScanConfig(start_deg=self.start_deg, stop_deg=self.stop_deg,
                              step_deg=self.step_deg).angles()
+
+
+@dataclass
+class CalRequest:
+    """One calibration, and the sweep it is taken at.
+
+    Carries the sweep because a calibration is only meaningful paired with it.
+    The worker configures the VNA from these values before calibrating, so the
+    record and the instrument cannot disagree about what was calibrated.
+
+    `reference_plane` is free text and is never inspected. Nothing in the data
+    distinguishes a cal taken at the instrument front panel from one taken at
+    the cable ends inside the chamber, and the difference is every dB of cable
+    loss in the pattern - so the operator states it and it gets written down.
+    """
+    start_hz: float = 2.0e9
+    stop_hz: float = 3.0e9
+    points: int = 101
+    if_bw_hz: float = 1.0e3
+    power_dbm: float = 0.0
+    parameter: str = "S21"
+    ports: tuple[int, int] = (1, 2)
+    orient: bool = False
+    reference_plane: str = ""
+
+    @classmethod
+    def from_args(cls, a: dict) -> "CalRequest":
+        f = {k: a[k] for k in cls.__dataclass_fields__ if k in a}
+        if "ports" in f:
+            f["ports"] = tuple(int(p) for p in f["ports"])[:2]
+        return cls(**f)
+
+    def sweep(self) -> dict:
+        return {"start_hz": self.start_hz, "stop_hz": self.stop_hz,
+                "points": self.points, "if_bw_hz": self.if_bw_hz,
+                "power_dbm": self.power_dbm, "parameter": self.parameter}
+
+    def as_scan(self) -> ScanRequest:
+        return ScanRequest(**self.sweep())
+
+
+# Fields whose disagreement between a calibration and a run matters. Power is
+# in the list because the A2202-Fx corrects per source level; parameter is not,
+# because a 2-port cal corrects every parameter it collected.
+CAL_SWEEP_KEYS = ("start_hz", "stop_hz", "points", "if_bw_hz", "power_dbm")
+
+
+def cal_mismatch(record: dict | None, req) -> list[str]:
+    """Which sweep settings a run does not share with the calibration.
+
+    Empty when they agree, or when there is no calibration to disagree with -
+    "uncalibrated" is already reported by correction_state and does not need
+    saying twice in different words.
+    """
+    if not record:
+        return []
+    sweep = record.get("sweep") or {}
+    out = []
+    for k in CAL_SWEEP_KEYS:
+        have, want = sweep.get(k), getattr(req, k, None)
+        if have is None or want is None:
+            continue
+        if abs(float(have) - float(want)) > 1e-6:
+            out.append(f"{k} {have:g} -> {want:g}")
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -114,6 +184,29 @@ class SimBackend:
     def correction_state(self) -> str:
         # Not "1". There is no calibration behind a synthesized pattern, and
         # saying otherwise would write a lie into meta.json.
+        return "n/a"
+
+    def acm_module(self) -> str | None:
+        return "SIMULATED AutoCal module (no hardware)"
+
+    def calibrate(self, req: "CalRequest", on_step=None,
+                  should_stop=None) -> str:
+        """Walk the procedure without calibrating anything.
+
+        Returns "n/a", not "1". A simulated calibration corrects nothing, and
+        the whole reason correction_state exists is so a run cannot claim to be
+        calibrated when it is not - which a sim that answered "1" here would
+        immediately break. What this is for is the UI: the modal, the steps,
+        the cancel button and the record all get exercised away from the rig.
+        """
+        for step in ("orienting the module to the ports",
+                     f"2-port AutoCal on ports {req.ports[0]} and {req.ports[1]}",
+                     "applying"):
+            if should_stop is not None and should_stop():
+                raise pm.Aborted("calibration stopped after the previous step")
+            if on_step:
+                on_step(step)
+            time.sleep(0.6)
         return "n/a"
 
     # -- control ------------------------------------------------------------
@@ -224,6 +317,25 @@ class HardwareBackend:
     def correction_state(self) -> str:
         return self.vna.correction_state()
 
+    def acm_module(self) -> str | None:
+        return self.vna.acm_module()
+
+    def calibrate(self, req: "CalRequest", on_step=None,
+                  should_stop=None) -> str:
+        """Configure the sweep, then run a 2-port AutoCal at it.
+
+        Configure first, deliberately: setting the sweep is what invalidates a
+        calibration, so doing it afterwards would throw away what was just
+        collected. The cancel hook is checked before each command and nowhere
+        else - a running AutoCal cannot be interrupted, and a button that
+        claimed otherwise would be worse than no button.
+        """
+        self.configure(req.as_scan())
+        if should_stop is not None and should_stop():
+            raise pm.Aborted("calibration stopped before it began")
+        return self.vna.acm_calibrate(ports=tuple(req.ports),
+                                      orient=req.orient, on_step=on_step)
+
     def set_speed(self, pct: float) -> None:
         self.pos.set_speed(pct)
 
@@ -278,8 +390,11 @@ class ChamberService:
         self.clients: set = set()
         self._cancel = threading.Event()
         self._worker: threading.Thread | None = None
+        self._cal_cancel = threading.Event()
+        self._cal_worker: threading.Thread | None = None
         self._lock = threading.Lock()
         self.last_run: dict | None = None
+        self.calibration: dict | None = _load_calibration()
 
     # -- push ---------------------------------------------------------------
     def push(self, payload: dict) -> None:
@@ -306,8 +421,13 @@ class ChamberService:
     def scanning(self) -> bool:
         return self._worker is not None and self._worker.is_alive()
 
+    @property
+    def calibrating(self) -> bool:
+        return self._cal_worker is not None and self._cal_worker.is_alive()
+
     def get_state(self) -> dict:
-        st = {"mode": self.backend.mode, "scanning": self.scanning}
+        st = {"mode": self.backend.mode, "scanning": self.scanning,
+              "calibrating": self.calibrating, "calibration": self.calibration}
         try:
             st.update({
                 "vna_idn": self.backend.vna_idn(),
@@ -351,6 +471,10 @@ class ChamberService:
     def _require_idle(self) -> None:
         if self.scanning:
             raise BackendError("a scan is running; cancel it first")
+        if self.calibrating:
+            # Both directions. The instruments are single-threaded and stateful,
+            # and a calibration has a person with their hands on the connectors.
+            raise BackendError("a calibration is running; cancel it first")
 
     def cmd_jog(self, a: dict) -> dict:
         self._require_idle()
@@ -401,6 +525,98 @@ class ChamberService:
         angles, freqs, mag = _read_run_csv(d / "pattern.csv")
         return {"meta": meta, "angles": angles, "freqs": freqs, "mag_db": mag}
 
+    # -- calibration --------------------------------------------------------
+    def cmd_acm_probe(self, _a: dict) -> dict:
+        """Read-only: can the software see an AutoCal module?
+
+        Never runs a calibration. A probe that quietly recalibrated the
+        instrument it was asked to inspect is a probe nobody trusts twice.
+        """
+        self._require_idle()
+        with self._lock:
+            module = self.backend.acm_module()
+        return {"module": module, "present": bool(module)}
+
+    def cmd_start_cal(self, a: dict) -> dict:
+        self._require_idle()
+        req = CalRequest.from_args(a)
+        self._cal_cancel.clear()
+        self._cal_worker = threading.Thread(target=self._run_cal, args=(req,),
+                                            daemon=True, name="chamber-cal")
+        self._cal_worker.start()
+        return {"started": True, "sweep": req.sweep()}
+
+    def cmd_cancel_cal(self, _a: dict) -> dict:
+        """Stop after the current step.
+
+        Deliberately not called abort. An AutoCal runs the whole
+        short/open/load/thru sequence inside one SCPI command with nowhere to
+        poll, so this cannot interrupt one in flight - it can only decline to
+        issue the next. The UI says the same thing in the same words.
+        """
+        if not self.calibrating:
+            return {"cancelled": False, "reason": "no calibration running"}
+        self._cal_cancel.set()
+        self.log("warn", "cal", "Cancel requested - stops after the current step")
+        return {"cancelled": True}
+
+    def _run_cal(self, req: CalRequest) -> None:
+        started = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.push({"type": "cal_started", "sweep": req.sweep(),
+                   "ports": list(req.ports),
+                   "reference_plane": req.reference_plane,
+                   "mode": self.backend.mode})
+        self.log("info", "cal", f"AutoCal on ports {req.ports[0]} and "
+                                f"{req.ports[1]}, {req.points} pts, "
+                                f"{req.start_hz/1e9:.3f}-{req.stop_hz/1e9:.3f} GHz")
+
+        def step(msg: str) -> None:
+            self.log("info", "cal", msg)
+            self.push({"type": "cal_step", "message": msg})
+
+        try:
+            with self._lock:
+                module = self.backend.acm_module()
+                if not module:
+                    raise BackendError(
+                        "no AutoCal module visible to the VNA software - check "
+                        "the ACM's USB connection, and see whether this build "
+                        "exposes AutoCal to SCPI at all")
+                self.push({"type": "cal_step", "message": f"module: {module}"})
+                state = self.backend.calibrate(req, on_step=step,
+                                               should_stop=self._cal_cancel.is_set)
+
+            record = {"taken_at": started,
+                      "finished": time.strftime("%Y-%m-%d %H:%M:%S"),
+                      "method": "ecal_solt2",
+                      "ports": list(req.ports),
+                      "reference_plane": req.reference_plane,
+                      "module": module,
+                      "mode": self.backend.mode,
+                      "sweep": req.sweep(),
+                      "correction_state": state}
+            self.calibration = record
+            _save_calibration(record)
+            on = pm.correction_is_on(state)
+            if on:
+                self.log("info", "cal", "calibration applied; correction is on")
+            else:
+                # Reached in sim, where "n/a" is the truthful answer and the
+                # record exists to exercise the UI rather than to be trusted.
+                self.log("warn", "cal", f"calibration finished but correction "
+                                        f"reads {state!r}")
+            self.push({"type": "cal_done", "ok": True, "cancelled": False,
+                       "record": record})
+
+        except pm.Aborted as e:
+            self.log("warn", "cal", str(e))
+            self.push({"type": "cal_done", "ok": False, "cancelled": True,
+                       "error": str(e)})
+        except Exception as e:
+            self.log("error", "cal", f"{type(e).__name__}: {e}")
+            self.push({"type": "cal_done", "ok": False, "cancelled": False,
+                       "error": str(e)})
+
     def cmd_start_scan(self, a: dict) -> dict:
         self._require_idle()
         req = ScanRequest.from_args(a)
@@ -438,9 +654,20 @@ class ChamberService:
                 self.log("warn", "vna", f"error correction state unknown "
                                         f"({correction})")
 
+            # A calibration is only meaningful at the sweep it was taken at. A
+            # VNA interpolating a cal across a span it never measured produces a
+            # plausible-looking answer of unknown quality, which is the same bug
+            # class as the split position reply - so say it out loud.
+            drift = cal_mismatch(self.calibration, req)
+            if drift:
+                self.log("warn", "vna",
+                         "this run does not match the calibration: "
+                         + "; ".join(drift))
+
             self.push({"type": "scan_started", "name": name,
                        "angles": angles.tolist(), "freqs": freqs.tolist(),
-                       "params": req.__dict__, "correction": correction})
+                       "params": req.__dict__, "correction": correction,
+                       "cal_mismatch": drift})
             self.log("info", "scan", f"{name}: {angles.size} angles, "
                                      f"{freqs.size} freqs")
 
@@ -484,7 +711,12 @@ class ChamberService:
                     # Without this a finished run cannot say whether it was
                     # calibrated, which makes two runs incomparable and neither
                     # of them trustworthy on its own.
-                    "correction_state": correction}
+                    "correction_state": correction,
+                    # Copied, not referenced. The next calibration overwrites
+                    # cal.json, and a finished run has to keep saying what it
+                    # was taken against.
+                    "calibration": self.calibration,
+                    "cal_mismatch": drift}
             (outdir / "meta.json").write_text(json.dumps(meta, indent=2))
             self.last_run = meta
             self.push({"type": "scan_done", "name": name, "cancelled": False,
@@ -520,6 +752,9 @@ class ChamberService:
         "set_speed": "cmd_set_speed",
         "list_runs": "cmd_list_runs",
         "load_run": "cmd_load_run",
+        "acm_probe": "cmd_acm_probe",
+        "start_cal": "cmd_start_cal",
+        "cancel_cal": "cmd_cancel_cal",
     }
 
     async def handle(self, msg: str) -> str | None:
@@ -552,6 +787,22 @@ def _json_default(o: Any):
     if isinstance(o, Path):
         return str(o)
     return str(o)
+
+
+def _load_calibration() -> dict | None:
+    """The last calibration, or None. A missing or unreadable file is not an
+    error - it means the rig has not been calibrated through this service, which
+    is the normal state on a fresh checkout."""
+    try:
+        return json.loads((RUNS_DIR / CAL_NAME).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _save_calibration(record: dict) -> None:
+    path = RUNS_DIR / CAL_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, indent=2))
 
 
 def _read_run_csv(path: Path):
