@@ -141,7 +141,16 @@ class PositionerConfig:
     # 115200 8N1 - the 9600,7,Odd,1 in ETS-Lindgren's docs describes the legacy
     # Holaday-compatible rear port, NOT the USB port. Verified 2026-08-20:
     # 9600 (both 7O1 and 8N1) times out, 115200 8N1 answers.
-    # Ethernet alternative: 'TCPIP0::<host>::inst0::INSTR'.
+    # Ethernet alternative: 'TCPIP0::<host>::inst0::INSTR'. Untested - the
+    # EMCenter has the port, but nothing here has spoken to it that way.
+    #
+    # The default below is a Windows COM port because that is where this rig's
+    # instruments attach today. It is the ONLY platform-specific value in this
+    # file: on Linux the same card is 'ASRL/dev/ttyUSB0::INSTR', which pyvisa
+    # parses into the same ASRL resource and which the framing setup in
+    # Positioner.__init__ still applies. Nothing else needs to change, because
+    # the VNA is reached through S2VNA's socket server rather than over USB, and
+    # a socket is a socket.
     resource: str = "ASRL16::INSTR"
     baud_rate: int = 115_200
     data_bits: int = 8

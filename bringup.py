@@ -100,6 +100,28 @@ def stage_env(rep: Report, mock: bool):
         mock_instruments.install()
         rep.ok("mock instruments installed", "no hardware will be touched")
 
+    # Which box is this. The rig has run on Windows so far, but S2VNA ships for
+    # Linux on x86_64 and ARM too, so the host is no longer a given - and the
+    # one thing that changes with it is the positioner's resource string.
+    import platform
+    rep.note("host", f"{platform.system()} {platform.machine()}, "
+                     f"Python {platform.python_version()}")
+
+    if platform.system() == "Linux" and not mock:
+        import glob
+        tty = sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*"))
+        if tty:
+            rep.note("serial devices", ", ".join(tty)
+                     + "  -> --pos ASRL" + tty[0] + "::INSTR")
+        else:
+            # The EMCenter uses FTDI's VID with ETS-Lindgren's own PID, which
+            # stock drivers do not claim - the same reason Windows needed their
+            # driver package. On Linux the in-kernel table is the equivalent
+            # gap, and binding it by hand is a one-liner.
+            rep.note("no serial devices", "if the EMCenter is plugged in: "
+                     "echo 0403 8570 | sudo tee "
+                     "/sys/bus/usb-serial/drivers/ftdi_sio/new_id")
+
     import pyvisa
     rm = pyvisa.ResourceManager()
     rep.ok("pyvisa ResourceManager", type(rm).__name__)

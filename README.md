@@ -201,6 +201,37 @@ and the service never learns a comparison is running. `uicheck.py` re-imports a
 finished run's own `pattern.csv` and asserts the deviation comes back at 0.00 dB,
 which is a round trip through the writer, the parser, and the comparator at once.
 
+## Which computer runs this
+
+The rig has run on Windows so far, but nothing here requires it. S2VNA ships for
+Windows and for Linux on both x86_64 and ARM, and it is S2VNA — not this project —
+that talks to the VNA over USB. Everything here reaches the instrument through
+S2VNA's **socket server on TCP 5025**, so the VNA side is identical on every
+platform, and can just as easily live on a different machine:
+
+```bash
+python chamber_service.py --vna TCPIP0::<other-host>::5025::SOCKET
+```
+
+The only genuinely platform-specific value in the project is the positioner's
+resource string — `ASRL16::INSTR` on Windows, `ASRL/dev/ttyUSB0::INSTR` on Linux.
+pyvisa parses both into the same ASRL resource and the 115200 8N1 framing applies
+either way. `bringup.py` stage 0 reports the host and, on Linux, names the serial
+devices it can see.
+
+Two things to confirm before settling on a host, neither of which is a code
+question:
+
+- **Does the build for that platform support the A2202?** S2VNA's model coverage
+  has grown over time and this rig runs 26.3.1. A build older than that may not
+  know the instrument, whatever the architecture.
+- **Is AutoCal supported there?** The ACM2202 is a USB device driven by the VNA
+  software. `bringup.py` stage 7 answers this wherever you run it.
+
+Throughput is unlikely to decide it. A chamber run is dominated by mechanical
+settling, not by sweeps — `thru_run/` is 72 angles of 101 points, and the axis
+spends far longer moving than the VNA spends measuring.
+
 ## Software and drivers
 
 Neither instrument works out of the box on a fresh machine. Both of these were

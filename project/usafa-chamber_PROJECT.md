@@ -172,6 +172,24 @@ has been seen to answer on this firmware. Mnemonics are centralized in `AcmCmds`
 and `bringup.py` stage 7 probes them read-only. Design and open questions:
 `project/acm-calibration_DESIGN.md`.
 
+**Host platform is open.** The rig has run on Windows, but S2VNA ships for
+Windows and for Linux on x86_64 and ARM, so the box is not decided. It barely
+matters to this code: S2VNA owns the USB link and this project reaches it through
+the socket server on 5025, which is identical everywhere and can be on another
+machine entirely (`--vna TCPIP0::<host>::5025::SOCKET`). The only
+platform-specific value is the positioner resource — `ASRL16::INSTR` on Windows,
+`ASRL/dev/ttyUSB0::INSTR` on Linux; both parse to the same ASRL resource and take
+the same framing. `bringup.py` stage 0 now reports the host and, on Linux, the
+serial devices it finds.
+
+What actually decides it is not architecture but coverage: whether the S2VNA
+build for that platform is new enough to know the **A2202** (this rig runs 26.3.1)
+and whether **AutoCal** is supported there. Both are checked at the chamber, not
+from here. If the EMCenter goes on Ethernet rather than USB, the FTDI question
+disappears on any host — including the custom-PID binding Linux would otherwise
+need (`0403:8570`, the same PID that needed ETS-Lindgren's driver package on
+Windows).
+
 **Open concerns:**
 - *FTDI link corruption.* One 72-point run logged 3 `ERROR 1` retries and 2 split
   position reads (~7% of exchanges); a later rotation test logged none. Handled in
