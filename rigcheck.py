@@ -278,6 +278,193 @@ def s_trigger_restored():
     return {}, COMMON + ["--step", "180", "--to-deg", "180"]
 
 
+def s_uncalibrated():
+    # A VNA with no calibration applied. The run is still a run - this asserts
+    # the operator is told, not that the scan is refused.
+    return ({"correction_off": True},
+            COMMON + ["--step", "90", "--to-deg", "355"])
+
+
+def check_uncalibrated(r, outdir):
+    assert r["rc"] == 0, f"exit {r['rc']}: {r['exc']}"
+    assert "THIS RUN IS UNCALIBRATED" in r["err"], (
+        "correction was off and nothing said so")
+    assert _angles(outdir) == [0.0, 90.0, 180.0, 270.0], (
+        "the warning aborted a scan that should have run anyway")
+    return "correction OFF reported, scan completed regardless"
+
+
+def s_correction_mute():
+    # The instrument refuses to answer CORR:STAT?. Unknown is not "off", and
+    # neither is a reason to lose the run.
+    return ({"correction_mute": True},
+            COMMON + ["--step", "180", "--to-deg", "180"])
+
+
+def check_correction_mute(r, outdir):
+    assert r["rc"] == 0, f"exit {r['rc']}: {r['exc']}"
+    assert "correction unknown" in r["err"], (
+        "an unanswered CORR:STAT? was not reported as unknown")
+    assert "UNCALIBRATED" not in r["err"], (
+        "silence was reported as an uncalibrated instrument")
+    return "unanswered query degraded to unknown, run kept"
+
+
+def s_meta_records_correction():
+    # The service path: whatever the state was, meta.json has to carry it, or
+    # a finished run cannot say whether it was calibrated.
+    return ({"correction_off": True, "_target": "service"}, ["--step", "90"])
+
+
+def check_meta_records_correction(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    meta = json.loads((outdir / "meta.json").read_text())
+    assert meta.get("correction_state") == "0", (
+        f"meta.json recorded correction_state={meta.get('correction_state')!r}, "
+        f"not the '0' the instrument reported")
+    return "meta.json records the uncalibrated state of the run"
+
+
+# -- calibration ------------------------------------------------------------
+# Nothing in this group reproduces observed behaviour. No calibration has ever
+# been run through this path, and the mnemonics it exercises are unverified -
+# see AcmCmds. What these hold is the *design*: exclusivity, the honest cancel,
+# and the record. Those survive the mnemonics turning out to be wrong.
+
+def s_cal_nominal():
+    return {"_target": "cal"}, []
+
+
+def check_cal_nominal(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    done = r["cal"].get("done") or {}
+    assert done.get("ok"), f"cal did not succeed: {done}"
+    rec = r["cal"].get("record") or {}
+    assert rec.get("sweep"), "no sweep recorded with the calibration"
+    assert rec.get("module"), "the module was not identified"
+    assert r["cal"].get("saved"), "cal.json was not written"
+    assert pm_on(rec.get("correction_state")), (
+        f"cal finished with correction {rec.get('correction_state')!r}")
+    return f"cal applied and recorded at {rec['sweep']['points']} pts"
+
+
+def s_cal_no_module():
+    # The likeliest real outcome of Wednesday: the software cannot see the
+    # module over SCPI. It has to fail as a clear message, not a traceback.
+    return {"acm_present": False, "_target": "cal"}, []
+
+
+def check_cal_no_module(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    done = r["cal"].get("done") or {}
+    assert done.get("ok") is False and not done.get("cancelled"), done
+    assert "AutoCal module" in done.get("error", ""), done.get("error")
+    assert not r["cal"].get("saved"), (
+        "a calibration that never happened was written to cal.json")
+    return "absent module refused with a readable message, nothing recorded"
+
+
+def s_cal_unsupported():
+    # The other likely outcome: the headers do not exist on this build.
+    return {"acm_headers_known": False, "_target": "cal"}, []
+
+
+def check_cal_unsupported(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    done = r["cal"].get("done") or {}
+    assert done.get("ok") is False, done
+    assert not r["cal"].get("saved"), "unsupported cal still wrote a record"
+    return "unsupported headers surfaced as a failed cal, nothing recorded"
+
+
+def s_cal_fails_midway():
+    # The state that matters: the cal command errors part-way. Whatever was
+    # collected must not be left sitting in the instrument.
+    return {"acm_fails": True, "_target": "cal"}, []
+
+
+def check_cal_fails_midway(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    done = r["cal"].get("done") or {}
+    assert done.get("ok") is False, done
+    assert r["cleared"] >= 1, (
+        "the cal failed and the collection buffer was never cleared - the "
+        "instrument is left half-collected")
+    assert not r["cal"].get("saved"), "a failed cal wrote a record"
+    return f"failure cleared the collection buffer ({r['cleared']}x)"
+
+
+def s_cal_no_apply():
+    # The quiet one: the command returns, and correction is still off. Nothing
+    # was applied, so nothing should be claimed.
+    return {"acm_no_apply": True, "_target": "cal"}, []
+
+
+def check_cal_no_apply(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    done = r["cal"].get("done") or {}
+    assert done.get("ok") is False, (
+        "a cal that applied nothing was reported as a success")
+    assert r["cleared"] >= 1, "nothing was cleared after a cal that did not apply"
+    return "cal that applied nothing reported as a failure"
+
+
+def s_cal_cancelled():
+    # Cancel before the first command goes out. This is the only place cancel
+    # can act - a running AutoCal has nowhere to poll - and the point is that
+    # it leaves nothing behind.
+    return {"_target": "cal"}, ["--cancel-first"]
+
+
+def check_cal_cancelled(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    done = r["cal"].get("done") or {}
+    assert done.get("cancelled") is True, done
+    assert not r["cals"], (
+        f"cancelled before the first step and still issued {r['cals']}")
+    assert not r["cal"].get("saved"), "a cancelled cal wrote a record"
+    return "cancel before the first command issued nothing and recorded nothing"
+
+
+def s_cal_refused_while_scanning():
+    return {"_target": "cal"}, ["--while-scanning"]
+
+
+def check_cal_refused_while_scanning(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    assert r["cal"].get("refused") is True, (
+        "a calibration started while a scan was running - two workers on "
+        "single-threaded instruments, with a person at the connectors")
+    assert r["cal"].get("scan_refused") is True, (
+        "a scan started while a calibration was running - the tower turns with "
+        "somebody's hands on the connectors")
+    return "refused both ways: " + r["cal"].get("scan_reason", "")
+
+
+def s_cal_sweep_mismatch():
+    # Calibrate at 2-3 GHz, then scan at 5-6 GHz. The run has to say so.
+    return {"_target": "cal"}, ["--then-scan"]
+
+
+def check_cal_sweep_mismatch(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    drift = r["cal"].get("scan_mismatch")
+    assert drift, ("a run at 5-6 GHz against a 2-3 GHz calibration reported no "
+                   "mismatch")
+    assert any("does not match the calibration" in w
+               for w in r["cal"].get("warnings", [])), (
+        "the mismatch was never said out loud")
+    meta = json.loads((outdir / "meta.json").read_text())
+    assert meta.get("calibration"), "meta.json carries no calibration record"
+    assert meta.get("cal_mismatch"), "meta.json does not record the mismatch"
+    return f"{len(drift)} setting(s) flagged and written into meta.json"
+
+
+def pm_on(state):
+    import pattern_measure
+    return pattern_measure.correction_is_on(state)
+
+
 SCENARIOS = [
     ("nominal", s_nominal, check_nominal),
     ("endpoint", s_endpoint, check_endpoint),
@@ -296,6 +483,17 @@ SCENARIOS = [
     ("sweep_time", s_sweep_time_unsupported, check_sweep_time_unsupported),
     ("trigger_restore", s_trigger_restored, check_trigger_restored),
     ("service_stops", s_service_stops, check_service_stops),
+    ("uncalibrated", s_uncalibrated, check_uncalibrated),
+    ("correction_mute", s_correction_mute, check_correction_mute),
+    ("meta_correction", s_meta_records_correction, check_meta_records_correction),
+    ("cal_nominal", s_cal_nominal, check_cal_nominal),
+    ("cal_no_module", s_cal_no_module, check_cal_no_module),
+    ("cal_unsupported", s_cal_unsupported, check_cal_unsupported),
+    ("cal_fails", s_cal_fails_midway, check_cal_fails_midway),
+    ("cal_no_apply", s_cal_no_apply, check_cal_no_apply),
+    ("cal_cancelled", s_cal_cancelled, check_cal_cancelled),
+    ("cal_vs_scan", s_cal_refused_while_scanning, check_cal_refused_while_scanning),
+    ("cal_mismatch", s_cal_sweep_mismatch, check_cal_sweep_mismatch),
 ]
 
 
@@ -320,7 +518,12 @@ def _child(faults_json: str, argv: list[str]) -> int:
 
     exc = ""
     try:
-        rc = _run_service(argv) if target == "service" else pattern_measure.main(argv)
+        if target == "cal":
+            rc = _run_cal(argv)
+        elif target == "service":
+            rc = _run_service(argv)
+        else:
+            rc = pattern_measure.main(argv)
     except SystemExit as e:                     # argparse and friends
         rc = int(e.code or 0)
     except BaseException as e:
@@ -333,7 +536,102 @@ def _child(faults_json: str, argv: list[str]) -> int:
         "stops": state.stops,
         "sweeps": state.sweeps,
         "trigger_restored": state.trigger_restored,
+        "cals": state.cals,
+        "cleared": state.collection_cleared,
+        "cal": _CAL_RESULT.copy(),
     }), flush=True)
+    return 0
+
+
+_CAL_RESULT: dict = {}
+
+
+def _run_cal(argv: list[str]) -> int:
+    """Drive ChamberService's calibration worker on the fake instruments.
+
+    Runs the worker on this thread so the scenario inspects a finished state,
+    the same arrangement _run_service uses. Push frames are collected rather
+    than dropped: what the UI is told is half of what these scenarios assert.
+    """
+    import asyncio
+    import warnings
+
+    import chamber_service as cs
+
+    warnings.filterwarnings("ignore", message=r"coroutine .* was never awaited")
+
+    outdir = Path(argv[argv.index("--outdir") + 1])
+    cs.RUNS_DIR = outdir.parent
+
+    frames: list[dict] = []
+    loop = asyncio.new_event_loop()
+    try:
+        backend = cs.HardwareBackend("TCPIP0::127.0.0.1::5025::SOCKET",
+                                     "ASRL16::INSTR", 1, "A")
+        svc = cs.ChamberService(backend, loop)
+        svc.push = frames.append                 # capture instead of broadcast
+
+        if "--cancel-first" in argv:
+            svc._cal_cancel.set()
+        if "--while-scanning" in argv:
+            # Stand in for a live scan worker without starting one: the guard
+            # reads the thread's liveness, so give it a thread that is alive.
+            import threading
+            stop = threading.Event()
+            svc._worker = threading.Thread(target=stop.wait, daemon=True)
+            svc._worker.start()
+            try:
+                svc.cmd_start_cal({})
+                _CAL_RESULT["refused"] = False
+            except cs.BackendError as e:
+                _CAL_RESULT["refused"] = True
+                _CAL_RESULT["reason"] = str(e)
+            finally:
+                stop.set()
+
+            # The other direction, and the one with a person in it: a tower
+            # that starts turning while somebody has their hands on the
+            # connectors. Same guard, asserted separately because a one-way
+            # lock would pass the test above and still be wrong.
+            stop2 = threading.Event()
+            svc._worker = None
+            svc._cal_worker = threading.Thread(target=stop2.wait, daemon=True)
+            svc._cal_worker.start()
+            try:
+                svc.cmd_start_scan({"step_deg": 90.0})
+                _CAL_RESULT["scan_refused"] = False
+            except cs.BackendError as e:
+                _CAL_RESULT["scan_refused"] = True
+                _CAL_RESULT["scan_reason"] = str(e)
+            finally:
+                stop2.set()
+        else:
+            svc._run_cal(cs.CalRequest(reference_plane="rigcheck"))
+
+        done = [f for f in frames if f.get("type") == "cal_done"]
+        _CAL_RESULT.update({
+            "frames": [f.get("type") for f in frames],
+            "done": done[-1] if done else None,
+            "record": svc.calibration,
+            "saved": (cs.RUNS_DIR / cs.CAL_NAME).is_file(),
+        })
+
+        if "--then-scan" in argv:
+            # A run taken at a different sweep than the calibration has to say
+            # so; this is the assertion the whole cal record exists for.
+            frames.clear()
+            svc._run_scan(cs.ScanRequest(start_deg=0.0, stop_deg=90.0,
+                                         step_deg=90.0, points=21,
+                                         start_hz=5.0e9, stop_hz=6.0e9,
+                                         name=outdir.name))
+            started = [f for f in frames if f.get("type") == "scan_started"]
+            _CAL_RESULT["scan_mismatch"] = (started[0].get("cal_mismatch")
+                                            if started else None)
+            _CAL_RESULT["warnings"] = [f["message"] for f in frames
+                                       if f.get("type") == "log"
+                                       and f.get("level") == "warn"]
+    finally:
+        loop.close()
     return 0
 
 
@@ -391,6 +689,9 @@ def run_one(name: str, setup, check, verbose: bool) -> tuple[bool, str]:
                 out.append(line)
         r = {"rc": payload.get("rc", proc.returncode),
              "exc": payload.get("exc", ""),
+             "cals": payload.get("cals", []),
+             "cleared": payload.get("cleared", 0),
+             "cal": payload.get("cal", {}),
              "stops": payload.get("stops", []),
              "sweeps": payload.get("sweeps", 0),
              "trigger_restored": payload.get("trigger_restored", False),

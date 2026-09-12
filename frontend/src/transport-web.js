@@ -58,6 +58,9 @@ export function createWebTransport(callbacks = {}) {
                 case 'scan_started':callbacks.onScanStarted?.(data); break;
                 case 'scan_point':  callbacks.onScanPoint?.(data); break;
                 case 'scan_done':   callbacks.onScanDone?.(data); break;
+                case 'cal_started': callbacks.onCalStarted?.(data); break;
+                case 'cal_step':    callbacks.onCalStep?.(data); break;
+                case 'cal_done':    callbacks.onCalDone?.(data); break;
                 case 'log':         callbacks.onLog?.(data.level, data.source, data.message); break;
                 default:            callbacks.onMessage?.(data);
             }
@@ -94,6 +97,9 @@ export function createWebTransport(callbacks = {}) {
         setSpeed:    (pct)   => invoke('set_speed', { percent: pct }),
         listRuns:    ()      => invoke('list_runs'),
         loadRun:     (name)  => invoke('load_run', { name }),
+        acmProbe:    ()      => invoke('acm_probe'),
+        startCal:    (p)     => invoke('start_cal', p),
+        cancelCal:   ()      => invoke('cancel_cal'),
         get isConnected() { return !!ws && ws.readyState === WebSocket.OPEN; },
     };
 }

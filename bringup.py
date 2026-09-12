@@ -9,8 +9,8 @@ of consequence, and reports exactly what came back.
     python bringup.py --pos ASRL16::INSTR --slot 1 --device A
     python bringup.py --mock                       # exercise the script itself
 
-Stages 0-4 are read-only. They query and never command motion. Stages 5 and 6
-turn the tower and require --allow-motion.
+Stages 0-4 and 7 are read-only. They query and never command motion. Stages 5
+and 6 turn the tower and require --allow-motion.
 
     --probe          when the positioner is silent, try the other plausible
                      framing combinations and report which one answered
@@ -99,6 +99,28 @@ def stage_env(rep: Report, mock: bool):
         import mock_instruments
         mock_instruments.install()
         rep.ok("mock instruments installed", "no hardware will be touched")
+
+    # Which box is this. The rig has run on Windows so far, but S2VNA ships for
+    # Linux on x86_64 and ARM too, so the host is no longer a given - and the
+    # one thing that changes with it is the positioner's resource string.
+    import platform
+    rep.note("host", f"{platform.system()} {platform.machine()}, "
+                     f"Python {platform.python_version()}")
+
+    if platform.system() == "Linux" and not mock:
+        import glob
+        tty = sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*"))
+        if tty:
+            rep.note("serial devices", ", ".join(tty)
+                     + "  -> --pos ASRL" + tty[0] + "::INSTR")
+        else:
+            # The EMCenter uses FTDI's VID with ETS-Lindgren's own PID, which
+            # stock drivers do not claim - the same reason Windows needed their
+            # driver package. On Linux the in-kernel table is the equivalent
+            # gap, and binding it by hand is a one-liner.
+            rep.note("no serial devices", "if the EMCenter is plugged in: "
+                     "echo 0403 8570 | sudo tee "
+                     "/sys/bus/usb-serial/drivers/ftdi_sio/new_id")
 
     import pyvisa
     rm = pyvisa.ResourceManager()
@@ -394,6 +416,111 @@ def stage_miniscan(rep: Report, args, allow: bool):
 
 # -------------------------------------------------------------------- main
 
+# ------------------------------------------------------------------ stage 7
+
+def stage_acm(rep: Report, io, ch: int = 1):
+    """Read-only AutoCal probe. Never runs a calibration.
+
+    This is the stage that decides whether dashboard-driven calibration exists
+    at all. The ACM2202 is a USB device on the PC running S2VNA, not on the
+    VNA, and that the software drives it from its own GUI does not establish
+    that it exposes it to a SCPI client. Everything asked here is a query.
+
+    Every mnemonic below is unverified - see AcmCmds. A -113 'Undefined header'
+    is a clean negative answer. A -110 followed by silence is the
+    SENS:SWE:TIME? failure mode and means the same short-timeout treatment,
+    not that the command is missing.
+    """
+    rep.stage(7, "AutoCal module (ACM2202), read-only")
+    if io is None:
+        rep.skip("all", "no VNA connection")
+        return
+
+    import pyvisa
+    import pattern_measure as pm
+    acm = pm.AcmCmds()
+
+    before = _corr(io, ch)
+    rep.note("correction before", before)
+
+    def probe(label: str, q: str, timeout_ms: int = 5000):
+        saved, io.timeout = io.timeout, timeout_ms
+        try:
+            reply = io.query(q).strip()
+            return reply
+        except pyvisa.VisaIOError as e:
+            rep.note(label, f"no reply ({type(e).__name__}) - either an "
+                            f"undefined header or the -110-then-silence case")
+            return None
+        finally:
+            io.timeout = saved
+            try:
+                io.query("SYST:ERR?")        # clear whatever got latched
+            except Exception:
+                pass
+
+    data = probe("module data", acm.module_data)
+    if data:
+        rep.ok("SYST:COMM:ECAL:DATA?", data.split(",")[0][:60]
+               + ("..." if len(data) > 60 else ""))
+        rep.note("", "the VNA software can see an AutoCal module")
+    else:
+        rep.note("SYST:COMM:ECAL:DATA?",
+                 "no module data - either nothing is plugged in, or this "
+                 "build does not expose AutoCal to SCPI")
+
+    # Does the header exist? Asked by sending it with its parameters missing
+    # and reading the error queue - a header that requires parameters cannot do
+    # anything without them, so nothing runs. -113 says the command does not
+    # exist; -109 (or any parameter complaint) says it does. Querying the write
+    # form instead would prove nothing: a write-only command has no reply
+    # either way.
+    # Only the commands that take parameters. ECAL:ORI:EXEC and ECAL:CCH take
+    # none, so sending them bare is not a probe - it is the command. Their
+    # existence is inferred from SOLT2 rather than tested, because a read-only
+    # stage that orients a module nobody has mated is not read-only.
+    for label, template in (("ECAL:SOLT2", acm.solt2),
+                            ("ECAL:SOLT1", acm.solt1)):
+        head = template.format(ch=ch, p1=acm.port1, p2=acm.port2,
+                               state="ON").split()[0]
+        try:
+            io.write(head)
+            err = io.query("SYST:ERR?").strip()
+        except pyvisa.VisaIOError as e:
+            rep.note(label, f"no answer from the error queue "
+                            f"({type(e).__name__}) - treat as the "
+                            f"-110-then-silence case")
+            continue
+        code = err.split(",")[0].strip()
+        if code.startswith("-113"):
+            rep.note(label, f"undefined header ({err}) - not available here")
+        elif code in ("0", "+0"):
+            # It accepted a header with no parameters. Either the parameters
+            # are optional or something ran; worth a person looking.
+            rep.note(label, "accepted with no parameters - check the front "
+                            "panel before trusting this")
+        else:
+            rep.ok(label + " header", f"parsed ({err})")
+
+    rep.note("ECAL:ORI:EXEC / ECAL:CCH",
+             "not probed - they take no parameters, so sending one is running "
+             "it; infer from SOLT2 and try them with the module mated")
+
+    after = _corr(io, ch)
+    if after == before:
+        rep.ok("correction undisturbed", f"{before} before and after")
+    else:
+        rep.bad("correction changed", f"{before} -> {after} - the probe was "
+                                      f"supposed to be read-only")
+
+
+def _corr(io, ch: int) -> str:
+    try:
+        return io.query(f"SENS{ch}:CORR:STAT?").strip()
+    except Exception as e:
+        return f"({type(e).__name__})"
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -414,7 +541,7 @@ def main(argv=None) -> int:
 
     prefix = f"{a.slot}{a.device}:"
     rep = Report()
-    rep.say("bring-up: stages 0-4 are read-only; 5 and 6 turn the tower.")
+    rep.say("bring-up: stages 0-4 and 7 are read-only; 5 and 6 turn the tower.")
     if a.allow_motion:
         rep.say("MOTION ENABLED. Confirm continuous/non-continuous mode on the "
                 "EMControl front panel before continuing.")
@@ -424,14 +551,16 @@ def main(argv=None) -> int:
     if a.skip_vna:
         rep.stage(1, "VNA, read-only")
         rep.skip("all", "--skip-vna")
+        vna_io = None
     else:
-        stage_vna(rep, rm, a.vna)
+        vna_io = stage_vna(rep, rm, a.vna)
 
     io = stage_pos_link(rep, rm, a.pos, prefix, a.probe)
     start = stage_pos_state(rep, io, prefix)
     stage_link_quality(rep, io, prefix, a.link_reads)
     stage_jog(rep, rm, a, start, a.allow_motion)
     stage_miniscan(rep, a, a.allow_motion)
+    stage_acm(rep, vna_io)
 
     rep.say("")
     rep.say(f"{rep.failed} failed, {rep.skipped} skipped")

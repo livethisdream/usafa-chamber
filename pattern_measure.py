@@ -34,6 +34,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import pyvisa
@@ -89,12 +90,67 @@ class PositionerCmds:
 
 
 @dataclass
+class AcmCmds:
+    """Copper Mountain AutoCal (ACM2202) mnemonics, in one place.
+
+    NOTHING HERE IS VERIFIED. Unlike PositionerCmds, which carries a dated
+    read-only probe against real firmware, every mnemonic below is a reading of
+    CMT's published command index and has not been seen to answer on this rig's
+    S2VNA 26.3.1. `bringup.py --acm` exists to settle that, read-only.
+
+    Two things worth knowing before reaching for the manual:
+
+    * CMT documents automatic calibration under **ECal** mnemonics, not `ACM`.
+      Searching for "ACM" finds the product page and nothing else.
+    * The module is a USB device on the PC running S2VNA, not on the VNA. That
+      the software drives it from its own GUI does not establish that it exposes
+      it to a SCPI client, which is the single question the probe answers.
+
+    Centralized for the same reason PositionerCmds is: when this project last
+    met an instrument, four mnemonics that obviously existed returned ERROR 1,
+    and having them in one dataclass made that a ten-minute correction rather
+    than a rewrite.
+    """
+    # Full 2-port SOLT via the module. The one the chamber actually wants: a
+    # transmission measurement needs both ports corrected.
+    solt2: str = "SENS{ch}:CORR:COLL:ECAL:SOLT2 {p1:d},{p2:d}"
+    solt1: str = "SENS{ch}:CORR:COLL:ECAL:SOLT1 {p1:d}"
+    # Orientation: which module port is on which VNA port. May be implicit in
+    # SOLT2 on modules that auto-orient; issued only when `orient` is asked for.
+    orient: str = "SENS{ch}:CORR:COLL:ECAL:ORI:EXEC"
+    confidence: str = "SENS{ch}:CORR:COLL:ECAL:CCH"
+    unknown_thru: str = "SENS{ch}:CORR:COLL:ECAL:UTHR:STAT {state}"
+    # Characterization data. Long, and read here only as a presence test - if
+    # this answers at all, the software can see a module.
+    module_data: str = "SYST:COMM:ECAL:DATA?"
+    # Discard a half-collected calibration. Issued on every exit path.
+    clear: str = "SENS{ch}:CORR:COLL:CLE"
+    query_state: str = "SENS{ch}:CORR:STAT?"    # verified 2026-08-20
+
+    port1: int = 1
+    port2: int = 2
+    # A 2-port cal is many sweeps, not one. The instrument default of 120 s is
+    # generous for a sweep and tight for this; a timeout landing mid-cal is
+    # precisely the state worth not reaching.
+    timeout_ms: int = 600_000
+
+
+@dataclass
 class PositionerConfig:
     # USB/serial (this rig): the EMCenter's FTDI virtual COM port. Framing is
     # 115200 8N1 - the 9600,7,Odd,1 in ETS-Lindgren's docs describes the legacy
     # Holaday-compatible rear port, NOT the USB port. Verified 2026-08-20:
     # 9600 (both 7O1 and 8N1) times out, 115200 8N1 answers.
-    # Ethernet alternative: 'TCPIP0::<host>::inst0::INSTR'.
+    # Ethernet alternative: 'TCPIP0::<host>::inst0::INSTR'. Untested - the
+    # EMCenter has the port, but nothing here has spoken to it that way.
+    #
+    # The default below is a Windows COM port because that is where this rig's
+    # instruments attach today. It is the ONLY platform-specific value in this
+    # file: on Linux the same card is 'ASRL/dev/ttyUSB0::INSTR', which pyvisa
+    # parses into the same ASRL resource and which the framing setup in
+    # Positioner.__init__ still applies. Nothing else needs to change, because
+    # the VNA is reached through S2VNA's socket server rather than over USB, and
+    # a socket is a socket.
     resource: str = "ASRL16::INSTR"
     baud_rate: int = 115_200
     data_bits: int = 8
@@ -209,7 +265,8 @@ def _explain_open_failure(resource: str, exc: Exception) -> str:
 
 
 class Vna:
-    def __init__(self, rm: pyvisa.ResourceManager, cfg: VnaConfig):
+    def __init__(self, rm: pyvisa.ResourceManager, cfg: VnaConfig,
+                 acm: "AcmCmds | None" = None):
         self.cfg = cfg
         try:
             self.io = rm.open_resource(cfg.resource)
@@ -219,6 +276,7 @@ class Vna:
         self.io.read_termination = "\n"
         self.io.write_termination = "\n"
         self.ch = cfg.channel
+        self.acm = acm or AcmCmds()
         self._restore: dict[str, str] = {}
 
     def idn(self) -> str:
@@ -279,6 +337,100 @@ class Vna:
                 self.io.query("SYST:ERR?")
             except pyvisa.VisaIOError:
                 pass
+
+    def correction_state(self) -> str:
+        """Error-correction state: '1' when a calibration is applied, '0' when not.
+
+        Returns '?' rather than raising. This is metadata about a run, not a
+        precondition for it - an instrument that will not answer should leave
+        the record honestly unknown rather than abort a scan that would
+        otherwise be fine. The caller decides what an unknown is worth.
+        """
+        try:
+            return self.io.query(f"SENS{self.ch}:CORR:STAT?").strip()
+        except (pyvisa.VisaIOError, ValueError):
+            return "?"
+
+    # -- automatic calibration module (ACM2202) -----------------------------
+    # Everything below speaks AcmCmds, which is unverified. See its docstring.
+
+    def acm_module(self) -> str | None:
+        """Identify the AutoCal module, or None when the software cannot see one.
+
+        A presence test, not a data read: the characterization array is long and
+        nothing here wants it, so only its first field is kept. Read with a short
+        timeout, because an unsupported header on this firmware answers -110 and
+        then goes quiet - the SENS:SWE:TIME? failure mode.
+        """
+        saved, self.io.timeout = self.io.timeout, 5_000
+        try:
+            raw = self.io.query(self.acm.module_data).strip()
+        except (pyvisa.VisaIOError, ValueError):
+            return None
+        finally:
+            self.io.timeout = saved
+            try:
+                self.io.query("SYST:ERR?")
+            except pyvisa.VisaIOError:
+                pass
+        return raw.split(",")[0].strip() or None
+
+    def acm_clear(self) -> None:
+        """Discard any half-collected calibration.
+
+        Never raises. This is the cleanup path, called from `finally` blocks on
+        failure and cancellation, and a cleanup that can itself throw turns one
+        problem into two.
+        """
+        try:
+            self.io.write(self.acm.clear.format(ch=self.ch))
+        except pyvisa.VisaIOError:
+            pass
+
+    def acm_calibrate(self, ports: tuple[int, int] | None = None,
+                      orient: bool = False,
+                      on_step: "Callable[[str], None] | None" = None) -> str:
+        """Run a 2-port AutoCal and return the resulting correction state.
+
+        Blocks for the whole procedure. There is no progress to poll and no
+        point to cancel at: the module runs short/open/load/thru inside one SCPI
+        command, so `on_step` reports what is *about* to happen rather than
+        pretending to track it. A caller wanting to cancel can only decline to
+        issue the next command - which is why the service's button says "stop
+        after this step" rather than "abort".
+
+        The collection buffer is cleared on every failing exit path. Leaving a
+        VNA half-collected is the calibration equivalent of walking away from a
+        turning tower.
+        """
+        a = self.acm
+        p1, p2 = ports or (a.port1, a.port2)
+        saved, self.io.timeout = self.io.timeout, a.timeout_ms
+        try:
+            if orient:
+                if on_step:
+                    on_step("orienting the module to the ports")
+                self.io.write(a.orient.format(ch=self.ch))
+                self.io.query("*OPC?")
+            if on_step:
+                on_step(f"2-port AutoCal on ports {p1} and {p2}")
+            self.io.write(a.solt2.format(ch=self.ch, p1=p1, p2=p2))
+            self.io.query("*OPC?")
+        except BaseException:
+            self.acm_clear()
+            raise
+        finally:
+            self.io.timeout = saved
+        self._check_errors("after AutoCal")
+        state = self.correction_state()
+        if not correction_is_on(state):
+            # The command returned and correction is still off. Something was
+            # collected and not applied; do not leave that sitting there.
+            self.acm_clear()
+            raise RuntimeError(
+                f"AutoCal completed but correction is {state!r}, not on - "
+                f"nothing was applied")
+        return state
 
     def frequencies(self) -> np.ndarray:
         raw = self.io.query(f"SENS{self.ch}:FREQ:DATA?")
@@ -516,6 +668,23 @@ class Positioner:
             pass
 
 
+def correction_is_on(state: str | None) -> bool | None:
+    """True / False / None-for-unknown, from a CORR:STAT? reply.
+
+    Three states, not two. An instrument that did not answer is not the same
+    as one that answered "off", and a run recorded as uncalibrated when the
+    query merely timed out would be thrown away for no reason.
+    """
+    if state is None:
+        return None
+    s = str(state).strip().upper()
+    if s in ("1", "+1", "ON", "TRUE"):
+        return True
+    if s in ("0", "+0", "OFF", "FALSE"):
+        return False
+    return None
+
+
 def _wrap180(x: float) -> float:
     return (x + 180.0) % 360.0 - 180.0
 
@@ -705,6 +874,17 @@ def main(argv=None) -> int:
             print(f"      {vcfg.points} pts, {vcfg.start_hz/1e9:.3f}-{vcfg.stop_hz/1e9:.3f} GHz, "
                   f"IFBW {vcfg.if_bw_hz:.0f} Hz, {sweep_txt}")
             sweep_s = sweep_s or 0.0
+
+            # Worth knowing before the tower turns, not after the run is on disk.
+            corr = vna.correction_state()
+            on = correction_is_on(corr)
+            if on is False:
+                print(f"      error correction OFF ({corr!r}) - THIS RUN IS "
+                      f"UNCALIBRATED", file=sys.stderr)
+            elif on is None:
+                print(f"      error correction unknown ({corr!r})", file=sys.stderr)
+            else:
+                print(f"      error correction on ({corr})")
 
         pos = Positioner(rm, pcfg, cmds)
         if pcfg.speed_percent is not None:

@@ -22,6 +22,9 @@ const $ = (id) => document.getElementById(id);
 const state = {
     connected: false,
     scanning: false,
+    mode: null,
+    calibrating: false,
+    calibration: null,
     angles: [],
     freqs: [],
     grid: [],
@@ -350,17 +353,186 @@ function setConnected(on) {
     if (!on) {
         $('mode-badge').textContent = 'offline';
         $('mode-badge').removeAttribute('data-mode');
+        $('corr-badge').hidden = true;
+        $('vna-corr').textContent = '—';
     }
     syncControls();
+}
+
+/**
+ * Read a CORR:STAT? reply the way acquisition-side `correction_is_on` does:
+ * true / false / null-for-unknown. An instrument that did not answer is not
+ * the same as one that answered "off".
+ */
+function correctionIsOn(raw) {
+    if (raw == null) return null;
+    const s = String(raw).trim().toUpperCase();
+    if (s === '1' || s === '+1' || s === 'ON' || s === 'TRUE') return true;
+    if (s === '0' || s === '+0' || s === 'OFF' || s === 'FALSE') return false;
+    return null;
+}
+
+/**
+ * Show whether the VNA is running against a calibration.
+ *
+ * Deliberately not an error state. An uncalibrated sweep is still a sweep, and
+ * plenty of alignment work is done with correction off on purpose - so this
+ * warns, in the corner, and never blocks. In sim there is no calibration to
+ * report at all: the backend says so with "n/a" and the badge stays down
+ * rather than inventing a green light behind synthesized data.
+ */
+function setCorrection(raw, mode) {
+    const on = correctionIsOn(raw);
+    const kv = $('vna-corr');
+    const badge = $('corr-badge');
+    if (!kv || !badge) return;
+
+    if (mode === 'sim' || raw == null || raw === '' || raw === 'n/a') {
+        kv.textContent = mode === 'sim' ? 'n/a (simulated)' : '—';
+        badge.hidden = true;
+        return;
+    }
+    badge.hidden = false;
+    if (on === true) {
+        kv.textContent = `on (${raw})`;
+        badge.textContent = 'CAL';
+        badge.className = 'status-pill corr-on';
+        badge.title = 'error correction on - this run is calibrated';
+    } else if (on === false) {
+        kv.textContent = `OFF (${raw})`;
+        badge.textContent = 'UNCAL';
+        badge.className = 'status-pill corr-off';
+        badge.title = 'error correction off - this run is uncalibrated';
+    } else {
+        kv.textContent = `unknown (${raw})`;
+        badge.textContent = 'CAL?';
+        badge.className = 'status-pill corr-unknown';
+        badge.title = 'the VNA did not answer SENS:CORR:STAT?';
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Calibration
+//
+// A wizard, not a button. Running an AutoCal means somebody walks into the
+// chamber, unmates the horn and the AUT, mates the ACM across the cable ends
+// and comes back out - so the UI's job is to state the procedure, take an
+// explicit acknowledgement that it has been done, and refuse to pretend the
+// cancel button can do more than it can.
+// ---------------------------------------------------------------------------
+
+function calParams() {
+    return {
+        start_hz: parseFloat($('f-start').value) * 1e9,
+        stop_hz: parseFloat($('f-stop').value) * 1e9,
+        points: parseInt($('f-points').value, 10),
+        if_bw_hz: parseFloat($('f-ifbw').value),
+        power_dbm: parseFloat($('f-power').value),
+        parameter: $('f-param').value,
+        reference_plane: $('cal-plane').value,
+    };
+}
+
+/** Which sweep settings a prospective run does not share with the cal. Mirrors
+ *  cal_mismatch() in the service, so the panel says the same thing the run's
+ *  meta.json will. */
+function calDrift(record) {
+    if (!record?.sweep) return [];
+    const want = calParams();
+    const label = { start_hz: 'start', stop_hz: 'stop', points: 'points',
+                    if_bw_hz: 'IF BW', power_dbm: 'power' };
+    return Object.keys(label)
+        .filter((k) => Math.abs(Number(record.sweep[k]) - Number(want[k])) > 1e-6)
+        .map((k) => label[k]);
+}
+
+function calAgeText(record) {
+    const t = Date.parse((record.taken_at || '').replace(' ', 'T'));
+    if (!Number.isFinite(t)) return record.taken_at || 'unknown date';
+    const days = Math.floor((Date.now() - t) / 86400000);
+    if (days <= 0) return 'today';
+    return days === 1 ? 'yesterday' : `${days} days ago`;
+}
+
+/** The one-line summary in the VNA panel, plus the drift warning under it. */
+function renderCalibration() {
+    const rec = state.calibration;
+    const summary = $('cal-summary');
+    const warn = $('cal-drift');
+    if (!rec) {
+        summary.textContent = 'none recorded';
+        warn.hidden = true;
+        return;
+    }
+    const span = `${(rec.sweep.start_hz / 1e9).toFixed(3)}–`
+               + `${(rec.sweep.stop_hz / 1e9).toFixed(3)} GHz`;
+    summary.textContent = `${calAgeText(rec)}, ${span}`
+        + (rec.mode === 'sim' ? ' (simulated)' : '');
+
+    const drift = calDrift(rec);
+    if (drift.length) {
+        warn.hidden = false;
+        warn.textContent = `The sweep set above differs from the calibration `
+            + `(${drift.join(', ')}). A run taken this way is corrected by `
+            + `interpolation at best. Recalibrate, or set the sweep back.`;
+    } else if (rec.mode === 'sim') {
+        warn.hidden = false;
+        warn.textContent = 'Simulated calibration — nothing was corrected.';
+    } else {
+        warn.hidden = true;
+    }
+}
+
+const CAL_STAGES = ['setup', 'run', 'done'];
+
+function calStage(which) {
+    CAL_STAGES.forEach((s) => { $(`cal-stage-${s}`).hidden = s !== which; });
+    const running = which === 'run';
+    $('cal-go').hidden = which !== 'setup';
+    $('cal-ack').disabled = running;
+    // "Cancel" while running means stop after the current step, and while
+    // finished means close. Saying so on the button is the whole point.
+    $('cal-cancel').textContent = running ? 'Stop after this step'
+                                : which === 'done' ? 'Close' : 'Cancel';
+}
+
+function openCalModal() {
+    const p = calParams();
+    $('cal-span').textContent = `${(p.start_hz / 1e9).toFixed(3)}–`
+                              + `${(p.stop_hz / 1e9).toFixed(3)} GHz`;
+    $('cal-pts').textContent = `${p.points} pts / ${p.if_bw_hz} Hz`;
+    $('cal-pow').textContent = `${p.power_dbm} dBm`;
+    $('cal-ack').checked = false;
+    $('cal-go').disabled = true;
+    $('cal-log').innerHTML = '';
+    calStage('setup');
+    $('cal-modal').hidden = false;
+}
+
+function closeCalModal() {
+    $('cal-modal').hidden = true;
+}
+
+function calLog(text) {
+    const line = document.createElement('div');
+    line.className = 'log-line info';
+    line.textContent = text;
+    $('cal-log').appendChild(line);
+    $('cal-log').scrollTop = $('cal-log').scrollHeight;
 }
 
 function applyState(s) {
     if (!s) return;
     $('mode-badge').textContent = s.mode === 'sim' ? 'SIMULATED' : 'HARDWARE';
     $('mode-badge').dataset.mode = s.mode;
+    state.mode = s.mode;
     $('vna-idn').textContent = s.vna_idn || '—';
     $('pos-idn').textContent = s.pos_idn || '—';
     $('pos-err').textContent = s.latched_error ?? '—';
+    setCorrection(s.correction, s.mode);
+    state.calibrating = !!s.calibrating;
+    state.calibration = s.calibration || null;
+    renderCalibration();
     if (s.angle != null) setPosition(s.angle);
     if (s.speed != null) $('speed-readout').textContent = `${s.speed.toFixed(0)}%`;
     if (s.error) addLog('error', 'state', s.error);
@@ -381,11 +553,13 @@ const SCAN_INPUTS = ['f-start', 'f-stop', 'f-points', 'f-ifbw', 'f-power', 'f-pa
                      'btn-zero', 'run-name'];
 
 function syncControls() {
-    const busy = state.scanning || !state.connected;
+    const busy = state.scanning || state.calibrating || !state.connected;
     SCAN_INPUTS.forEach((id) => { const el = $(id); if (el) el.disabled = busy; });
     document.querySelectorAll('[data-jog]').forEach((b) => { b.disabled = busy; });
     $('btn-scan').disabled = busy;
-    $('btn-scan').textContent = state.scanning ? 'Scanning…' : 'Start scan';
+    $('btn-scan').textContent = state.scanning ? 'Scanning…'
+                             : state.calibrating ? 'Calibrating…' : 'Start scan';
+    $('btn-cal').disabled = busy;
     // Stop stays enabled whenever there is a link: it is the one control that
     // must always be reachable, and the service preempts rather than queues.
     $('btn-stop').disabled = !state.connected;
@@ -434,8 +608,37 @@ const transport = createTransport({
     onClose: () => setConnected(false),
     onState: applyState,
     onPosition: (deg) => setPosition(deg),
+    onCalStarted: (m) => {
+        state.calibrating = true;
+        calStage('run');
+        $('cal-status').textContent = 'Calibrating…';
+        calLog(`ports ${m.ports.join(' and ')}, plane: ${m.reference_plane || '—'}`);
+        syncControls();
+    },
+    onCalStep: (m) => calLog(m.message),
+    onCalDone: (m) => {
+        state.calibrating = false;
+        calStage('done');
+        if (m.ok) {
+            state.calibration = m.record;
+            renderCalibration();
+            $('cal-result').textContent = m.record?.mode === 'sim'
+                ? 'Simulated calibration recorded. Nothing was corrected.'
+                : 'Calibration applied and recorded.';
+        } else {
+            $('cal-result').textContent = m.cancelled
+                ? `Stopped. ${m.error || ''}`
+                : `Calibration failed: ${m.error || 'unknown error'}`;
+        }
+        syncControls();
+    },
     onScanStarted: (m) => {
         state.scanning = true;
+        setCorrection(m.correction, state.mode);
+        if (m.cal_mismatch?.length) {
+            addLog('warn', 'vna',
+                   `this run does not match the calibration: ${m.cal_mismatch.join('; ')}`);
+        }
         state.angles = m.angles;
         state.freqs = m.freqs;
         state.grid = new Array(m.angles.length).fill(null);
@@ -696,6 +899,23 @@ function wire() {
         dial.draw();
         guard(() => transport.jog({ deg: v }));
     });
+
+    $('btn-cal').addEventListener('click', openCalModal);
+    $('cal-close').addEventListener('click', closeCalModal);
+    $('cal-ack').addEventListener('change', (e) => {
+        $('cal-go').disabled = !e.target.checked;
+    });
+    $('cal-go').addEventListener('click', () => {
+        guard(() => transport.startCal(calParams()));
+    });
+    $('cal-cancel').addEventListener('click', () => {
+        if (state.calibrating) guard(() => transport.cancelCal());
+        else closeCalModal();
+    });
+    // The sweep fields are what a calibration is pinned to, so the drift
+    // warning has to follow them as they are typed, not only on reconnect.
+    ['f-start', 'f-stop', 'f-points', 'f-ifbw', 'f-power'].forEach((id) =>
+        $(id).addEventListener('input', renderCalibration));
 
     $('btn-zero').addEventListener('click', () => guard(() => transport.zeroHere()));
     $('btn-clear-log').addEventListener('click', () => { $('log').innerHTML = ''; });

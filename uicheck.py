@@ -129,6 +129,14 @@ def main(argv=None) -> int:
             check("connects to service", page.inner_text("#mode-badge") == "SIMULATED",
                   page.inner_text("#vna-idn"))
 
+            # Correction state, in sim. There is no calibration behind a
+            # synthesized pattern, so the badge must stay down rather than show
+            # a green CAL the numbers do not deserve.
+            check("sim claims no calibration",
+                  "n/a" in page.inner_text("#vna-corr")
+                  and page.locator("#corr-badge").is_hidden(),
+                  page.inner_text("#vna-corr"))
+
             # System theme is the default, and the page starts on whatever the
             # browser reports. Assert that before touching the button.
             check("follows system theme",
@@ -199,6 +207,53 @@ def main(argv=None) -> int:
                 check("round-trips its own run", ok, f"delta {delta}")
             else:
                 check("round-trips its own run", False, f"{own} not written")
+
+            # Calibration. The sim corrects nothing and says so - what is
+            # under test is the wizard: the modal opens, the acknowledgement
+            # gates the button, the run reports steps, and the panel picks up
+            # the record. The drift warning is then forced by retuning the
+            # sweep away from what was calibrated.
+            page.click(".tab-btn:has-text('Pattern Measurement')")
+            open_section(page, "VNA")
+            page.click("#btn-cal")
+            page.wait_for_timeout(400)
+            check("cal modal opens",
+                  page.is_visible("#cal-modal") and not page.is_enabled("#cal-go"),
+                  "start disabled until the module is acknowledged")
+            page.screenshot(path=str(a.shots / "cal-setup.png"))
+
+            page.check("#cal-ack")
+            page.wait_for_timeout(200)
+            check("acknowledgement enables start", page.is_enabled("#cal-go"))
+            page.click("#cal-go")
+            page.wait_for_timeout(600)
+            page.screenshot(path=str(a.shots / "cal-running.png"))
+
+            for _ in range(40):
+                if page.is_visible("#cal-stage-done"):
+                    break
+                page.wait_for_timeout(300)
+            check("calibration completes",
+                  page.is_visible("#cal-stage-done"),
+                  page.inner_text("#cal-result") if page.is_visible("#cal-result") else "")
+            check("sim cal claims nothing",
+                  "imulated" in page.inner_text("#cal-result"),
+                  page.inner_text("#cal-result"))
+            page.click("#cal-cancel")
+            page.wait_for_timeout(300)
+            check("cal record lands in the panel",
+                  page.inner_text("#cal-summary") != "none recorded",
+                  page.inner_text("#cal-summary"))
+
+            page.fill("#f-start", "5")
+            page.dispatch_event("#f-start", "input")
+            page.wait_for_timeout(300)
+            check("sweep drift is flagged",
+                  page.locator("#cal-drift").is_visible()
+                  and "differs" in page.inner_text("#cal-drift"),
+                  page.inner_text("#cal-drift")[:60])
+            page.fill("#f-start", "2")
+            page.dispatch_event("#f-start", "input")
 
             open_section(page, "Output")
             page.click("#btn-refresh-runs")
