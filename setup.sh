@@ -116,6 +116,25 @@ if [ "$SKIP_FRONTEND" -eq 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
+head 'Verification tooling'
+ok 'rigcheck.py / bringup.py ready (no extra dependencies)'
+info 'rigcheck.py  - drivers vs fake instruments, no hardware'
+info 'bringup.py   - staged bring-up; stages 5-6 need --allow-motion'
+
+# playwright is optional and pulls a ~150 MB browser afterwards, so report
+# rather than install. find_spec avoids importing it, so a missing package
+# costs nothing and prints nothing to stderr.
+if "$LINK_NAME/bin/python" -c \
+    'import importlib.util,sys; sys.exit(0 if importlib.util.find_spec("playwright") else 1)' \
+    2>/dev/null; then
+    ok 'uicheck.py ready (playwright present)'
+else
+    warn 'uicheck.py unavailable - playwright not installed (optional)'
+    info "  UV_PROJECT_ENVIRONMENT=$LINK_NAME uv sync --extra ui"
+    info "  $LINK_NAME/bin/playwright install chromium"
+fi
+
+# ---------------------------------------------------------------------------
 head 'Hardware'
 info 'Not checked here - the VNA and positioner attach to Windows.'
 info 'Run setup.ps1 on the acquisition PC for driver and readiness checks.'

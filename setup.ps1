@@ -194,6 +194,63 @@ function Initialize-Frontend {
     return $true
 }
 
+function Test-Tooling {
+    Write-Head 'Verification tooling'
+    $py = Join-Path $ProjectRoot "$LinkName\Scripts\python.exe"
+    if (-not (Test-Path $py)) {
+        Write-Warn 'venv not built yet; run without -CheckOnly first'
+        return
+    }
+
+    # rigcheck and bringup run on the base dependencies, so if the venv built at
+    # all they are usable. Say so explicitly - they are the two things worth
+    # running before trusting a new machine with the rig.
+    Write-Ok 'rigcheck.py / bringup.py ready (no extra dependencies)'
+    Write-Info 'rigcheck.py          - drivers vs fake instruments, no hardware'
+    Write-Info 'bringup.py           - staged bring-up; stages 5-6 need --allow-motion'
+
+    # uicheck needs playwright plus a downloaded browser, neither of which is in
+    # the default install. Report rather than install: the browser download is
+    # large and unexpected as a side effect of running setup.
+    #
+    # The probe prints a token and never writes to stderr. Redirecting a native
+    # executable's stderr in Windows PowerShell wraps each line in a
+    # NativeCommandError and trips $ErrorActionPreference='Stop', so a missing
+    # optional package would abort the whole script instead of being reported.
+    # Single-quoted inside Python on purpose: PowerShell strips double quotes
+    # when handing an argument to a native executable, so "playwright" would
+    # reach Python as a bare name and raise NameError.
+    $probe = @'
+import importlib.util as u, sys
+if u.find_spec('playwright') is None:
+    sys.stdout.write('nomodule'); raise SystemExit
+try:
+    from playwright.sync_api import sync_playwright
+    p = sync_playwright().start()
+    try:
+        p.chromium.executable_path
+        sys.stdout.write('ready')
+    finally:
+        p.stop()
+except Exception:
+    sys.stdout.write('nobrowser')
+'@
+    $result = (& $py -c $probe | Out-String).Trim()
+
+    switch ($result) {
+        'ready' { Write-Ok 'uicheck.py ready (playwright + chromium present)' }
+        'nobrowser' {
+            Write-Warn 'playwright installed but its browser is missing'
+            Write-Info "  $LinkName\Scripts\playwright.exe install chromium"
+            Add-Problem 'playwright browser missing' 'Run: .venv-win\Scripts\playwright.exe install chromium'
+        }
+        default {
+            Write-Warn 'uicheck.py unavailable - playwright not installed (optional)'
+            Write-Info '  uv sync --extra ui   then   .venv-win\Scripts\playwright.exe install chromium'
+        }
+    }
+}
+
 # --------------------------------------------------------------------------
 # Hardware readiness
 # --------------------------------------------------------------------------
@@ -371,6 +428,7 @@ if ($CheckOnly) {
     $envOk = (Initialize-Venv) -and (Initialize-Frontend)
 }
 
+Test-Tooling
 Test-Positioner
 Test-Vna
 

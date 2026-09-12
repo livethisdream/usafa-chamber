@@ -212,6 +212,17 @@ Windows).
 
 # ToDo
 
+- [ ] **Add a calibration routine driven through S2VNA.** Every measurement so
+      far is raw S21 including cable and fixture loss — the thru reference sits
+      at −0.88 dB for exactly that reason. A response or full 2-port cal would
+      reference the measurement to the antenna ports instead, which matters as
+      soon as absolute gain rather than pattern shape is wanted. Check which of
+      S2VNA's cal commands are exposed over SCPI on firmware 26.3.1 before
+      designing around them; `SENS:CORR:*` is the likely family, and this
+      firmware has already been found missing a documented command
+      (`SENS:SWE:TIME?`), so verify rather than assume. Worth deciding whether
+      the dashboard triggers a cal or only reports the correction state.
+
 - [ ] Fix the stale line in **Special Instructions** claiming the EMCenter
       mnemonics are unverified — they were probed directly against the card and
       are recorded in `PositionerCmds`. (Section is read-only to `/bye`.)

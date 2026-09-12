@@ -200,11 +200,78 @@ class Aborted(Exception):
     """Raised when a move is cancelled through seek()'s should_abort hook."""
 
 
+class InstrumentUnavailable(RuntimeError):
+    """An instrument could not be opened, with a reason worth acting on.
+
+    pyvisa reports a failed open as a bare status code - 'could not connect:
+    -1073807339' - which says nothing about the cause. For this rig the cause is
+    almost always one of a small set of known, fixable things, and naming the fix
+    beats naming the error code.
+    """
+
+
+def _socket_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
+    import socket
+    s = socket.socket()
+    s.settimeout(timeout)
+    try:
+        s.connect((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _explain_open_failure(resource: str, exc: Exception) -> str:
+    """Turn a failed resource open into an instruction.
+
+    The VNA case is the one that recurs: S2VNA serves SCPI on a socket that is
+    off by default and is a GUI-only toggle, so a perfectly healthy, connected
+    VNA is unreachable until someone opens the application and turns it on. It
+    can also stop listening mid-session. Nothing about the pyvisa error hints at
+    any of that.
+    """
+    res = resource.strip()
+    m = re.match(r"TCPIP\d*::([^:]+)::(\d+)::SOCKET", res, re.I)
+    if m:
+        host, port = m.group(1), int(m.group(2))
+        lines = [f"cannot reach the VNA at {host}:{port} ({exc})"]
+        if not _socket_reachable(host, port):
+            lines += [
+                f"  Nothing is listening on {port}.",
+                "  The A2202-Fx serves SCPI through the S2VNA application, not directly:",
+                "    1. Launch S2VNA  (installs to C:\\VNA\\S2VNA\\S2VNA.exe, not Program Files)",
+                "    2. Enable System -> Misc Setup -> Network Setup -> Socket Server",
+                "  It is off by default, and can stop listening if a client dies without",
+                "  closing cleanly - toggling it off and on again restores it.",
+                "  Run setup.ps1 -CheckOnly to confirm before retrying.",
+            ]
+        else:
+            lines.append(f"  Something is listening on {port} but did not answer as a VNA.")
+        return "\n".join(lines)
+
+    if res.upper().startswith("ASRL"):
+        return "\n".join([
+            f"cannot open the positioner at {res} ({exc})",
+            "  Check that the EMCenter is powered and connected, and that the port",
+            "  number matches - it is COM16 on this rig, i.e. 'ASRL16::INSTR'.",
+            "  If Device Manager shows the chassis but no COM port, the ETS-Lindgren",
+            "  USB driver is missing. Run setup.ps1 -CheckOnly, which tells the",
+            "  difference between unplugged and a failed driver install.",
+        ])
+
+    return f"cannot open {res} ({exc})"
+
+
 class Vna:
     def __init__(self, rm: pyvisa.ResourceManager, cfg: VnaConfig,
                  acm: "AcmCmds | None" = None):
         self.cfg = cfg
-        self.io = rm.open_resource(cfg.resource)
+        try:
+            self.io = rm.open_resource(cfg.resource)
+        except Exception as e:
+            raise InstrumentUnavailable(_explain_open_failure(cfg.resource, e)) from e
         self.io.timeout = cfg.timeout_ms
         self.io.read_termination = "\n"
         self.io.write_termination = "\n"
@@ -410,7 +477,10 @@ class Positioner:
     def __init__(self, rm: pyvisa.ResourceManager,
                  cfg: PositionerConfig, cmds: PositionerCmds):
         self.cfg, self.cmds = cfg, cmds
-        self.io = rm.open_resource(cfg.resource)
+        try:
+            self.io = rm.open_resource(cfg.resource)
+        except Exception as e:
+            raise InstrumentUnavailable(_explain_open_failure(cfg.resource, e)) from e
         self.io.timeout = cfg.timeout_ms
         self.io.write_termination = cfg.write_termination
         self.io.read_termination = cfg.read_termination

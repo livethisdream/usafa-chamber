@@ -122,7 +122,8 @@ compare between cables.
 Chromium and asserts on what the page shows rather than on what the service sent:
 
 ```bash
-pip install playwright && playwright install chromium
+uv sync --extra ui                 # playwright; kept out of the default install
+.venv-win/Scripts/playwright.exe install chromium      # ~150 MB browser
 npm --prefix frontend install && npm --prefix frontend run build
 python uicheck.py                  # screenshots land in ui-shots/
 ```
