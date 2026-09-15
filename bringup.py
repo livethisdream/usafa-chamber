@@ -459,15 +459,16 @@ def stage_acm(rep: Report, io, ch: int = 1):
             except Exception:
                 pass
 
-    data = probe("module data", acm.module_data)
-    if data:
-        rep.ok("SYST:COMM:ECAL:DATA?", data.split(",")[0][:60]
-               + ("..." if len(data) > 60 else ""))
-        rep.note("", "the VNA software can see an AutoCal module")
+    ready = probe("module ready", acm.ready)
+    info = probe("module info", acm.info)
+    if ready in ("1", "+1") and info and info.strip('"'):
+        rep.ok("SYST:COMM:ECAL:READ?", ready)
+        rep.ok("ECAL:INF?", info.strip('"')[:90])
+        rep.note("", "the VNA software can see a ready AutoCal module")
     else:
-        rep.note("SYST:COMM:ECAL:DATA?",
-                 "no module data - either nothing is plugged in, or this "
-                 "build does not expose AutoCal to SCPI")
+        rep.note("SYST:COMM:ECAL:READ? / ECAL:INF?",
+                 f"ready={ready!r} info={info!r} - no module attached, or "
+                 f"not yet ready")
 
     # Does the header exist? Asked by sending it with its parameters missing
     # and reading the error queue - a header that requires parameters cannot do

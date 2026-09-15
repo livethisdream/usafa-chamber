@@ -93,10 +93,12 @@ class PositionerCmds:
 class AcmCmds:
     """Copper Mountain AutoCal (ACM2202) mnemonics, in one place.
 
-    NOTHING HERE IS VERIFIED. Unlike PositionerCmds, which carries a dated
-    read-only probe against real firmware, every mnemonic below is a reading of
-    CMT's published command index and has not been seen to answer on this rig's
-    S2VNA 26.3.1. `bringup.py --acm` exists to settle that, read-only.
+    VERIFIED 2026-09-15 on this rig's S2VNA 26.3.1 with an ACM2202.1 mated at
+    the chamber cable ends: `ready`, `info`, `query_state`, and a full SOLT2
+    2-port AutoCal. *OPC? blocks until SOLT2 finishes (7.6 s at 401 points,
+    100 kHz-2 GHz), and a confidence check against the module's stored CHECk
+    standard agreed to 0.004 dB rms. ORI:EXEC, CCH, UTHR and CLE match the S2VNA
+    programming manual but have not been run.
 
     Two things worth knowing before reaching for the manual:
 
@@ -120,9 +122,14 @@ class AcmCmds:
     orient: str = "SENS{ch}:CORR:COLL:ECAL:ORI:EXEC"
     confidence: str = "SENS{ch}:CORR:COLL:ECAL:CCH"
     unknown_thru: str = "SENS{ch}:CORR:COLL:ECAL:UTHR:STAT {state}"
-    # Characterization data. Long, and read here only as a presence test - if
-    # this answers at all, the software can see a module.
-    module_data: str = "SYST:COMM:ECAL:DATA?"
+    # Presence and identity, both parameterless. READ? answers '1' with a
+    # module mated and ready; INF? answers a quoted, comma-separated string led
+    # by model and serial, or '""' plus -241 "AutoCal Module is not ready" with
+    # none attached. Not SYST:COMM:ECAL:DATA? - it requires <path>,<impedance>,
+    # and sent bare it times out with -109, which read as "no module" and
+    # refused every calibration with the module plugged in.
+    ready: str = "SYST:COMM:ECAL:READ?"
+    info: str = "SENS:CORR:COLL:ECAL:INF?"
     # Discard a half-collected calibration. Issued on every exit path.
     clear: str = "SENS{ch}:CORR:COLL:CLE"
     query_state: str = "SENS{ch}:CORR:STAT?"    # verified 2026-08-20
@@ -355,16 +362,19 @@ class Vna:
     # Everything below speaks AcmCmds, which is unverified. See its docstring.
 
     def acm_module(self) -> str | None:
-        """Identify the AutoCal module, or None when the software cannot see one.
+        """Identify a ready AutoCal module, or None when there is none.
 
-        A presence test, not a data read: the characterization array is long and
-        nothing here wants it, so only its first field is kept. Read with a short
-        timeout, because an unsupported header on this firmware answers -110 and
-        then goes quiet - the SENS:SWE:TIME? failure mode.
+        READ? says whether a module is mated and ready; INF? names it. INF? is
+        quoted and comma-separated, led by model and serial -
+        '"ACM2202.1,25343319,25.9 C,CHAR0,..."' - and answers '""' with nothing
+        attached. Short timeout on both, because an unsupported header on this
+        firmware answers -110 and then goes quiet.
         """
         saved, self.io.timeout = self.io.timeout, 5_000
         try:
-            raw = self.io.query(self.acm.module_data).strip()
+            if self.io.query(self.acm.ready).strip() not in ("1", "+1"):
+                return None
+            raw = self.io.query(self.acm.info).strip().strip('"')
         except (pyvisa.VisaIOError, ValueError):
             return None
         finally:
@@ -373,7 +383,12 @@ class Vna:
                 self.io.query("SYST:ERR?")
             except pyvisa.VisaIOError:
                 pass
-        return raw.split(",")[0].strip() or None
+        fields = [f.strip() for f in raw.split(",")]
+        if not fields[0]:
+            return None
+        if len(fields) > 1 and fields[1]:
+            return f"{fields[0]} s/n {fields[1]}"
+        return fields[0]
 
     def acm_clear(self) -> None:
         """Discard any half-collected calibration.

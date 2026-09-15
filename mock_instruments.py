@@ -213,10 +213,30 @@ class FakeVna:
                 raise pyvisa.VisaIOError(VI_ERROR_TMO)
             return "1\n" if self.corrected else "0\n"
         if "SYST:COMM:ECAL:DATA?" in c:
-            f = self.s.faults
-            if not (f.acm_present and f.acm_headers_known):
+            # Observed live 2026-09-15: DATA? requires <path>,<impedance>. Sent
+            # bare it latches -109 and never replies. The first presence test
+            # did exactly that, and this fake answered it - which is how a
+            # calibration path that could never run passed rigcheck.
+            if " " not in c:
+                self.err = '-109,"Missing parameter"'
                 raise pyvisa.VisaIOError(VI_ERROR_TMO)
-            return "Copper Mountain Technologies,ACM2202,SIMULATED,1.0\n"
+            return "0,0\n"
+        if "SYST:COMM:ECAL:READ?" in c:
+            f = self.s.faults
+            if not f.acm_headers_known:
+                raise pyvisa.VisaIOError(VI_ERROR_TMO)
+            return "1\n" if f.acm_present else "0\n"
+        if "ECAL:INF?" in c:
+            f = self.s.faults
+            if not f.acm_headers_known:
+                raise pyvisa.VisaIOError(VI_ERROR_TMO)
+            if not f.acm_present:
+                self.err = '-241,"AutoCal Module is not ready"'
+                return '""\n'
+            # Shape copied from the real ACM2202.1 on 2026-09-15, quotes included.
+            return ('"ACM2202.1,SIMULATED,25.9 C,CHAR0,2026/01/29 14:03:09,'
+                    '100 kHz,22 GHz,1601,26.4 C,A2202,rigcheck,NS,'
+                    '3.5mm -F-,3.5mm -F-,,"\n')
         if c.startswith("TRIG:SOUR?"):
             return self.trig_source + "\n"
         if c.startswith("INIT") and ":CONT?" in c:
