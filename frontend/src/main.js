@@ -1120,33 +1120,58 @@ function renderSweepReadout() {
  */
 function exportTouchstone() {
     const f = state.sweepFreqs;
-    const need = SWEEP_PARAMS.filter((n) => !state.sweepData[n]);
     if (!f.length) return;
+
+    // A capture of one reflection parameter is a 1-port measurement, and
+    // Touchstone has a format for that. Writing it as .s2p with the other
+    // three columns zeroed would hand somebody a file claiming a through path
+    // of exactly zero and an infinitely reflective port 2 - numbers a reader
+    // will happily plot. Which parameter it is goes in the header, because
+    // .s1p itself cannot say whether it is S11 or S22.
+    const have = SWEEP_PARAMS.filter((n) => state.sweepData[n]);
+    const onePort = have.length === 1 && REFLECTION.includes(have[0]);
+
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const cal = state.calibration;
     const lines = [
         `! USAFA chamber VNA capture ${stamp}`,
         `! ${state.mode === 'sim' ? 'SIMULATED - not a measurement' : 'hardware'}`,
-        need.length ? `! missing (written as 0): ${need.join(' ')}` : '! all four parameters measured',
-        '# HZ S RI R 50',
+        `! measured: ${have.join(' ')}`,
     ];
+    if (cal) {
+        lines.push(`! calibration: ${cal.method || 'unknown'}`
+                 + ` ports ${(cal.ports || []).join('+') || '?'}`
+                 + `, plane: ${cal.reference_plane || 'not stated'}`);
+    } else {
+        lines.push('! calibration: none recorded by this service');
+    }
+    if (!onePort) {
+        const need = SWEEP_PARAMS.filter((n) => !state.sweepData[n]);
+        lines.push(need.length
+            ? `! NOT MEASURED, written as zero: ${need.join(' ')}`
+            : '! all four parameters measured');
+    }
+    lines.push('# HZ S RI R 50');
+
     const at = (name, i) => {
         const d = state.sweepData[name];
         return d ? [d.re[i], d.im[i]] : [0, 0];
     };
+    // Touchstone 2-port column order is S11 S21 S12 S22 - not the order a
+    // reader expects, and the usual source of transposed data.
+    const cols = onePort ? have : ['S11', 'S21', 'S12', 'S22'];
     f.forEach((hz, i) => {
-        // Touchstone 2-port column order is S11 S21 S12 S22, which is not the
-        // order a reader expects and is the usual source of transposed data.
-        const cols = ['S11', 'S21', 'S12', 'S22']
-            .map((n) => at(n, i).map((v) => v.toExponential(9)).join(' '));
-        lines.push(`${hz.toFixed(0)} ${cols.join(' ')}`);
+        const vals = cols.map((n) => at(n, i).map((v) => v.toExponential(9)).join(' '));
+        lines.push(`${hz.toFixed(0)} ${vals.join(' ')}`);
     });
+
     const blob = new Blob([lines.join('\n') + '\n'], { type: 'text/plain' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `sweep_${stamp}.s2p`;
+    a.download = `sweep_${stamp}.${onePort ? 's1p' : 's2p'}`;
     a.click();
     URL.revokeObjectURL(a.href);
-    addLog('info', 'sweep', `exported ${a.download}`);
+    addLog('info', 'sweep', `exported ${a.download} (${have.join(' ')})`);
 }
 
 function onSweepStarted(m) {
