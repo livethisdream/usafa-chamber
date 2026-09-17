@@ -171,6 +171,17 @@ class PositionerConfig:
     move_timeout_s: float = 120.0
     motion_start_timeout_s: float = 3.0   # grace period for the card to report motion
     position_tol_deg: float = 0.5
+    # Link corruption on this rig arrives in bursts, not as lone bytes: a
+    # rejected 'SK' retried immediately is rejected again, and the scan dies
+    # three moves in. Measured 2026-09-17 with the VNA at -30 dBm and its sweep
+    # held off, so this is the link itself and not RF from the chamber. Retries
+    # are spaced rather than immediate, which is what lets them land.
+    link_retries: int = 3          # attempts per command, including the first
+    retry_delay_s: float = 0.25    # pause before re-sending, to outlast a burst
+    # A move that silently does not happen is worse than one that fails: the
+    # sweep is still taken, and the cut is recorded against an angle the tower
+    # never reached. Re-command instead of warning.
+    seek_retries: int = 2          # extra attempts at the move itself
 
 
 @dataclass
@@ -323,6 +334,21 @@ class Vna:
         self.io.write("FORM:DATA ASC")
         self._check_errors("after configure")
 
+    def set_parameter(self, parameter: str) -> None:
+        """Point the single trace at another S-parameter, leaving the sweep alone.
+
+        A VNA-only capture wants all four, and configure() would reprogram the
+        whole sweep and re-save the trigger state for each one. This changes
+        only what the trace measures. cfg.parameter is updated with it, because
+        measure() validates its reply against cfg and the two drifting apart is
+        how you get a point-count error that blames the wrong thing.
+        """
+        c = self.ch
+        self.io.write(f"CALC{c}:PAR1:DEF {parameter}")
+        self.io.write(f"CALC{c}:PAR1:SEL")
+        self.cfg.parameter = parameter
+        self._check_errors(f"after selecting {parameter}")
+
     def sweep_time_s(self) -> float | None:
         """Sweep time in seconds, or None when the firmware has no such query.
 
@@ -402,10 +428,17 @@ class Vna:
         except pyvisa.VisaIOError:
             pass
 
-    def acm_calibrate(self, ports: tuple[int, int] | None = None,
+    def acm_calibrate(self, ports=None,
                       orient: bool = False,
                       on_step: "Callable[[str], None] | None" = None) -> str:
-        """Run a 2-port AutoCal and return the resulting correction state.
+        """Run an AutoCal and return the resulting correction state.
+
+        One port in `ports` runs SOLT1, two runs SOLT2. A reflection-only
+        measurement - an antenna on one port and nothing on the other - wants
+        the 1-port: it corrects the port being measured, needs only one side of
+        the module mated, and does not fail because the other port has nothing
+        on it to orient against. A 2-port cal corrects reflection too, so this
+        is about what the bench can actually present, not about accuracy.
 
         Blocks for the whole procedure. There is no progress to poll and no
         point to cancel at: the module runs short/open/load/thru inside one SCPI
@@ -419,7 +452,9 @@ class Vna:
         turning tower.
         """
         a = self.acm
-        p1, p2 = ports or (a.port1, a.port2)
+        p = tuple(ports) if ports else (a.port1, a.port2)
+        if len(p) not in (1, 2):
+            raise ValueError(f"an AutoCal is over one or two ports, not {len(p)}")
         saved, self.io.timeout = self.io.timeout, a.timeout_ms
         try:
             if orient:
@@ -427,21 +462,33 @@ class Vna:
                     on_step("orienting the module to the ports")
                 self.io.write(a.orient.format(ch=self.ch))
                 self.io.query("*OPC?")
-            if on_step:
-                on_step(f"2-port AutoCal on ports {p1} and {p2}")
-            self.io.write(a.solt2.format(ch=self.ch, p1=p1, p2=p2))
+            if len(p) == 1:
+                if on_step:
+                    on_step(f"1-port AutoCal on port {p[0]}")
+                self.io.write(a.solt1.format(ch=self.ch, p1=p[0]))
+            else:
+                if on_step:
+                    on_step(f"2-port AutoCal on ports {p[0]} and {p[1]}")
+                self.io.write(a.solt2.format(ch=self.ch, p1=p[0], p2=p[1]))
             self.io.query("*OPC?")
         except BaseException:
             self.acm_clear()
             raise
         finally:
             self.io.timeout = saved
-        self._check_errors("after AutoCal")
+        err = self._check_errors("after AutoCal")
         state = self.correction_state()
         if not correction_is_on(state):
             # The command returned and correction is still off. Something was
             # collected and not applied; do not leave that sitting there.
             self.acm_clear()
+            # Lead with the instrument's own words when it gave any. A failed
+            # auto-orientation names the port it could not see, which is the
+            # whole diagnosis; "correction is off" alone sends somebody
+            # hunting through the SCPI by hand to find out why.
+            if err:
+                raise RuntimeError(
+                    f"AutoCal did not apply: {err} (correction is {state!r})")
             raise RuntimeError(
                 f"AutoCal completed but correction is {state!r}, not on - "
                 f"nothing was applied")
@@ -463,13 +510,24 @@ class Vna:
                 f"Trace/channel state does not match the configured sweep.")
         return flat[0::2] + 1j * flat[1::2]
 
-    def _check_errors(self, where: str) -> None:
+    def _check_errors(self, where: str) -> str | None:
+        """Drain one error off the queue; print it and hand it back.
+
+        Returning it is the point. This call is destructive - reading the queue
+        empties it - so a caller that only prints has thrown away the one
+        description of the fault the instrument was ever going to give. A line
+        on a service console is not something the operator sees; an exception
+        message is. Callers that have nothing better to do with it may still
+        ignore the return, which is why the print stays.
+        """
         try:
             err = self.io.query("SYST:ERR?").strip()
         except pyvisa.VisaIOError:
-            return
+            return None
         if err and not err.startswith(("0", "+0")):
             print(f"[vna] error {where}: {err}", file=sys.stderr)
+            return err
+        return None
 
     def close(self) -> None:
         # Hand the instrument back the way we found it, so the front panel is
@@ -522,48 +580,59 @@ class Positioner:
         finally:
             self.io.timeout = saved
 
-    def _w(self, body: str, _retry: bool = True) -> None:
+    def _w(self, body: str) -> None:
         """Write and check the acknowledgement.
 
         The card answers a good command with 'OK' and a malformed one with
         'ERROR n'. Leaving either unread desynchronizes every later query,
         which then reads the previous command's answer instead of its own.
 
-        An ERROR here is occasionally a corrupted byte on the FTDI link rather
-        than a genuinely bad command - observed once mid-scan on a 'SK' that
-        was provably valid. Aborting a multi-minute scan over one bad byte is
-        the wrong trade, so a rejection is retried once after resynchronizing.
-        Every command sent through here is an idempotent absolute instruction
-        (seek to an angle, define the current angle, stop), so re-sending is
-        safe by construction. The retry warns rather than staying silent, so a
-        link that is genuinely degrading still shows up in the log.
-        """
-        self.io.write(self.cmds.prefix + body)
-        saved, self.io.timeout = self.io.timeout, self.cfg.drain_timeout_ms
-        try:
-            reply = self.io.read().strip()
-        except pyvisa.VisaIOError:
-            reply = ""              # silence is an acceptable success case
-        finally:
-            self.io.timeout = saved
-        if reply and reply.upper().startswith("ERROR"):
-            if _retry:
-                print(f"[pos] {body!r} -> {reply}; resyncing and retrying once",
-                      file=sys.stderr)
-                self._flush_input()
-                return self._w(body, _retry=False)
-            raise RuntimeError(f"positioner rejected {body!r}: {reply}")
+        An ERROR here is usually a corrupted byte on the FTDI link rather than
+        a genuinely bad command - a provably valid 'SK' comes back rejected.
+        Aborting a multi-minute scan over one bad byte is the wrong trade, so a
+        rejection is retried after resynchronizing. Every command sent through
+        here is an idempotent absolute instruction (seek to an angle, define
+        the current angle, stop), so re-sending is safe by construction.
 
-    def _q(self, body: str, _retry: bool = True) -> str:
-        reply = self.io.query(self.cmds.prefix + body).strip()
-        if reply.upper().startswith("ERROR"):
-            if _retry:
-                print(f"[pos] {body!r} -> {reply}; resyncing and retrying once",
-                      file=sys.stderr)
+        The retries are spaced. The corruption comes in bursts, and an
+        immediate re-send lands inside the same burst and is rejected again -
+        which is precisely how a scan died on its third move with the chamber
+        quiet. Every attempt is logged, so a link that is genuinely degrading
+        still shows up rather than being silently absorbed.
+        """
+        last = ""
+        for attempt in range(1, max(1, self.cfg.link_retries) + 1):
+            self.io.write(self.cmds.prefix + body)
+            saved, self.io.timeout = self.io.timeout, self.cfg.drain_timeout_ms
+            try:
+                reply = self.io.read().strip()
+            except pyvisa.VisaIOError:
+                reply = ""          # silence is an acceptable success case
+            finally:
+                self.io.timeout = saved
+            if not (reply and reply.upper().startswith("ERROR")):
+                return
+            last = reply
+            if attempt < max(1, self.cfg.link_retries):
+                print(f"[pos] {body!r} -> {reply}; resyncing and retrying "
+                      f"({attempt}/{self.cfg.link_retries - 1})", file=sys.stderr)
                 self._flush_input()
-                return self._q(body, _retry=False)
-            raise RuntimeError(f"positioner rejected {body!r}: {reply}")
-        return reply
+                time.sleep(self.cfg.retry_delay_s)
+        raise RuntimeError(f"positioner rejected {body!r}: {last}")
+
+    def _q(self, body: str) -> str:
+        last = ""
+        for attempt in range(1, max(1, self.cfg.link_retries) + 1):
+            reply = self.io.query(self.cmds.prefix + body).strip()
+            if not reply.upper().startswith("ERROR"):
+                return reply
+            last = reply
+            if attempt < max(1, self.cfg.link_retries):
+                print(f"[pos] {body!r} -> {reply}; resyncing and retrying "
+                      f"({attempt}/{self.cfg.link_retries - 1})", file=sys.stderr)
+                self._flush_input()
+                time.sleep(self.cfg.retry_delay_s)
+        raise RuntimeError(f"positioner rejected {body!r}: {last}")
 
     # A complete position reply always carries its units: '90.0 DEGREES'.
     _POS_RE = re.compile(r"^[-+]?\d+(?:\.\d+)?\s*DEG", re.I)
@@ -635,8 +704,37 @@ class Positioner:
         than a second thread writing a stop command into the middle of this
         thread's request/response exchange. Serial access stays single-threaded.
         """
+        for attempt in range(1, max(1, self.cfg.seek_retries + 1) + 1):
+            actual, started = self._seek_once(deg, should_abort)
+            if abs(_wrap180(actual - deg)) <= self.cfg.position_tol_deg:
+                return actual
+            last = (actual, started)
+            if attempt <= self.cfg.seek_retries:
+                print(f"[pos] asked {deg:.1f}, read {actual:.1f} - "
+                      f"re-commanding the move "
+                      f"(attempt {attempt}/{self.cfg.seek_retries + 1})",
+                      file=sys.stderr)
+                time.sleep(self.cfg.retry_delay_s)
+
+        actual, started = last
+        if not started:
+            # Never saw motion and we are not where we asked to be: the seek
+            # did not take. Refuse to measure rather than log a bad cut.
+            raise RuntimeError(
+                f"positioner never moved: asked {deg:.1f} deg, still at "
+                f"{actual:.1f} deg after {self.cfg.seek_retries + 1} attempts. "
+                f"Check the slot/device prefix ({self.cmds.prefix!r}) and the "
+                f"seek mnemonic.")
+        raise RuntimeError(
+            f"positioner did not reach {deg:.1f} deg: read {actual:.1f} deg "
+            f"after {self.cfg.seek_retries + 1} attempts "
+            f"({abs(_wrap180(actual - deg)):.2f} deg out). Measuring here "
+            f"would record the cut against an angle the tower never reached.")
+
+    def _seek_once(self, deg: float, should_abort=None) -> tuple[float, bool]:
+        """One attempt at the move. Returns (position, whether motion began)."""
         if abs(_wrap180(self.position() - deg)) <= self.cfg.position_tol_deg:
-            return self.position()          # already parked; no move to wait on
+            return self.position(), True    # already parked; no move to wait on
 
         self._w(self.cmds.seek.format(pos=deg))
 
@@ -662,19 +760,7 @@ class Positioner:
             time.sleep(0.1)
 
         time.sleep(self.cfg.settle_s)                # mechanical ring-down
-        actual = self.position()
-        err = abs(_wrap180(actual - deg))
-        if err > self.cfg.position_tol_deg:
-            if not started:
-                # Never saw motion and we are not where we asked to be: the seek
-                # did not take. Refuse to measure rather than log a bad cut.
-                raise RuntimeError(
-                    f"positioner never moved: asked {deg:.1f} deg, still at "
-                    f"{actual:.1f} deg. Check the slot/device prefix "
-                    f"({self.cmds.prefix!r}) and the seek mnemonic.")
-            print(f"[pos] warning: asked {deg:.1f}, read {actual:.1f} "
-                  f"({err:.2f} deg error)", file=sys.stderr)
-        return actual
+        return self.position(), started
 
     def close(self) -> None:
         try:

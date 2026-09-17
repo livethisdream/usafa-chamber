@@ -140,7 +140,7 @@ def s_error_retry():
 
 def check_error_retry(r, outdir):
     assert r["rc"] == 0, f"exit {r['rc']}: {r['exc']}"
-    assert "resyncing and retrying once" in r["err"], "no retry was logged"
+    assert "resyncing and retrying" in r["err"], "no retry was logged"
     a = _angles(outdir)
     assert a == [0.0, 90.0, 180.0, 270.0], a
     return "one ERROR absorbed by the retry, scan completed"
@@ -164,7 +164,7 @@ def s_query_error():
 
 def check_query_error(r, outdir):
     assert r["rc"] == 0, f"exit {r['rc']}: {r['exc']}"
-    assert "resyncing and retrying once" in r["err"], "no query retry logged"
+    assert "resyncing and retrying" in r["err"], "no query retry logged"
     return "ERROR on a query resynced and re-read"
 
 
@@ -267,6 +267,48 @@ def check_service_stops(r, outdir):
     return f"worker stopped the axis at {r['stops']} before reporting"
 
 
+def s_scan_negative_angles():
+    # A cut across boresight: -90 to -80, on a card whose limits allow it.
+    # Every angle must reach the card exactly as asked. -90 and 270 are the
+    # same position reached by turning opposite ways, and the tower has a
+    # cable through it, so a helpful-looking `% 360` picks the direction for
+    # the operator and can wind the cable up.
+    return {"_target": "service"}, ["--step", "5", "--start", "-90",
+                                    "--stop", "-80"]
+
+
+def check_scan_negative_angles(r, outdir):
+    assert r["rc"] == 0, f"the scan across boresight failed: {r['exc']}"
+    assert r["seeks"], "no seek was issued at all"
+    rewritten = [s for s in r["seeks"] if s > 180.0]
+    assert not rewritten, (
+        f"angles were normalised into 0-360 before being sent: {rewritten}. "
+        f"That reaches the same positions by turning the other way.")
+    assert any(s < 0 for s in r["seeks"]), (
+        f"a scan starting at -90 sent no negative target at all: {r['seeks']}")
+    return f"sent {r['seeks']} unmodified"
+
+
+def s_scan_outside_limits():
+    # The rig as it shipped: CCW limit 0, so the card refuses every negative
+    # target with ERROR 3. Nothing in software can read the limits back - UL?
+    # and LL? are rejected - so the only honest thing is to fail loudly rather
+    # than quietly rewrite the angle into one the card will accept.
+    return {"_target": "service", "ccw_limit_deg": 0.0}, \
+        ["--step", "5", "--start", "-90", "--stop", "-80"]
+
+
+def check_scan_outside_limits(r, outdir):
+    blob = r["err"] + r["exc"]
+    assert "ERROR 3" in blob or "rejected" in blob, (
+        f"a target outside the travel limits was not surfaced: {blob[-300:]}")
+    rewritten = [s for s in r["seeks"] if s > 180.0]
+    assert not rewritten, (
+        f"the angle was rewritten to dodge the limit: {rewritten}. The tower "
+        f"would have turned the long way round instead of refusing.")
+    return "out-of-range target refused rather than silently redirected"
+
+
 def check_trigger_restored(r, outdir):
     assert r["rc"] == 0, f"exit {r['rc']}: {r['exc']}"
     assert r["trigger_restored"], (
@@ -348,6 +390,29 @@ def check_cal_nominal(r, outdir):
     return f"cal applied and recorded at {rec['sweep']['points']} pts"
 
 
+def s_cal_one_port():
+    # Reflection only: an antenna on port 1 and nothing on port 2. A 2-port
+    # would have no second side to calibrate against, so the cal has to be able
+    # to be one port - and has to issue SOLT1, not SOLT2 with a port dropped.
+    return {"_target": "cal"}, ["--ports", "1"]
+
+
+def check_cal_one_port(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    done = r["cal"].get("done") or {}
+    assert done.get("ok") is True, f"a 1-port cal failed: {done}"
+    issued = " ".join(r["cals"])
+    assert "SOLT1" in issued, f"no SOLT1 was issued: {r['cals']}"
+    assert "SOLT2" not in issued, (
+        f"a 1-port calibration issued SOLT2: {r['cals']}")
+    rec = done.get("record") or {}
+    assert rec.get("method") == "ecal_solt1", (
+        f"recorded as {rec.get('method')!r} - the record has to say which cal "
+        f"it was, or a 1-port gets trusted for transmission later")
+    assert rec.get("ports") == [1], rec.get("ports")
+    return f"issued {r['cals'][-1]!r} and recorded it as 1-port"
+
+
 def s_cal_no_module():
     # The likeliest real outcome of Wednesday: the software cannot see the
     # module over SCPI. It has to fail as a clear message, not a traceback.
@@ -407,6 +472,94 @@ def check_cal_no_apply(r, outdir):
         "a cal that applied nothing was reported as a success")
     assert r["cleared"] >= 1, "nothing was cleared after a cal that did not apply"
     return "cal that applied nothing reported as a failure"
+
+
+def s_cal_error_surfaced():
+    # The 2026-09-17 fault, reproduced: the cal is accepted, applies nothing,
+    # and the only account of why is one line in the error queue. Reading that
+    # queue empties it, so if the driver does not carry the text into the
+    # exception it is gone for good and the dashboard can only say "correction
+    # is off" - which is what sent somebody probing SCPI by hand for an hour.
+    return {"acm_error": '-230,"Auto-Orientation Error for Analyzer Port(s): 1"',
+            "_target": "cal"}, []
+
+
+def check_cal_error_surfaced(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    done = r["cal"].get("done") or {}
+    assert done.get("ok") is False, "a cal that applied nothing claimed success"
+    msg = done.get("error") or ""
+    assert "Auto-Orientation" in msg, (
+        f"the instrument said why and the operator never saw it: {msg!r}")
+    assert "Port(s): 1" in msg, (
+        f"the faulty port was named and then dropped: {msg!r}")
+    assert r["cleared"] >= 1, "nothing was cleared after a cal that did not apply"
+    assert not r["cal"].get("saved"), "a failed cal wrote a record"
+    return "instrument's reason reached the operator, naming the port"
+
+
+def s_sweep_nominal():
+    # A VNA-only capture: all four S-parameters at one position, no positioner
+    # involvement at all.
+    return {"_target": "sweep"}, []
+
+
+def check_sweep_nominal(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    sw = r["sweep"]
+    # Log frames are interleaved throughout; the shape that matters is the
+    # measurement frames in order.
+    seq = [t for t in sw["types"] if t != "log"]
+    assert seq[0] == "sweep_started", seq
+    assert seq[-1] == "sweep_done", seq
+    got = [t["parameter"] for t in sw["traces"]]
+    assert got == ["S11", "S21", "S12", "S22"], got
+    for t in sw["traces"]:
+        assert t["n_re"] == t["n_im"] == 11, t
+        assert t["complex"], (
+            f"{t['parameter']} arrived with an all-zero imaginary part - the "
+            f"phase was dropped, and a Smith chart cannot be drawn from "
+            f"magnitude")
+    assert sw["done"]["cancelled"] is False, sw["done"]
+    return f"captured {', '.join(got)} as complex pairs"
+
+
+def s_sweep_vs_scan():
+    return {"_target": "sweep"}, ["--while-scanning"]
+
+
+def check_sweep_vs_scan(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    msg = r["sweep"]["refused"].get("sweep_vs_scan")
+    assert msg, "a sweep started while a scan was running - both would program the VNA"
+    return f"refused while scanning: {msg}"
+
+
+def s_sweep_no_positioner():
+    # The bench rig: a VNA and nothing else. The capture must work and
+    # everything that turns the tower must refuse readably.
+    return {"_target": "sweep"}, ["--no-positioner"]
+
+
+def check_sweep_no_positioner(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    sw = r["sweep"]
+    assert len(sw["traces"]) == 4, (
+        f"a VNA-only rig could not complete a capture: {sw['types']}")
+    assert sw["state"]["has_positioner"] is False, sw["state"]
+    assert sw["pos_opened"] is False, (
+        "the service opened the positioner anyway - --no-positioner reached "
+        "argparse and went no further")
+    assert sw["state"]["connected"] is True, (
+        "a rig with no tower reported itself disconnected - the VNA was "
+        f"answering: {sw['state']}")
+    for name in ("seek", "jog", "zero"):
+        msg = sw["refused"].get(name, "")
+        assert msg, f"{name} was allowed with no positioner attached"
+        assert "AttributeError" not in msg, (
+            f"{name} failed on a None rather than refusing: {msg}")
+        assert "no positioner" in msg, f"{name} refused unreadably: {msg}"
+    return "captured without a tower; seek/jog/zero refused readably"
 
 
 def s_cal_cancelled():
@@ -483,15 +636,22 @@ SCENARIOS = [
     ("sweep_time", s_sweep_time_unsupported, check_sweep_time_unsupported),
     ("trigger_restore", s_trigger_restored, check_trigger_restored),
     ("service_stops", s_service_stops, check_service_stops),
+    ("scan_negative_angles", s_scan_negative_angles, check_scan_negative_angles),
+    ("scan_outside_limits", s_scan_outside_limits, check_scan_outside_limits),
     ("uncalibrated", s_uncalibrated, check_uncalibrated),
     ("correction_mute", s_correction_mute, check_correction_mute),
     ("meta_correction", s_meta_records_correction, check_meta_records_correction),
     ("cal_nominal", s_cal_nominal, check_cal_nominal),
+    ("cal_one_port", s_cal_one_port, check_cal_one_port),
     ("cal_no_module", s_cal_no_module, check_cal_no_module),
     ("cal_unsupported", s_cal_unsupported, check_cal_unsupported),
     ("cal_fails", s_cal_fails_midway, check_cal_fails_midway),
     ("cal_no_apply", s_cal_no_apply, check_cal_no_apply),
+    ("cal_error_surfaced", s_cal_error_surfaced, check_cal_error_surfaced),
     ("cal_cancelled", s_cal_cancelled, check_cal_cancelled),
+    ("sweep_nominal", s_sweep_nominal, check_sweep_nominal),
+    ("sweep_vs_scan", s_sweep_vs_scan, check_sweep_vs_scan),
+    ("sweep_no_positioner", s_sweep_no_positioner, check_sweep_no_positioner),
     ("cal_vs_scan", s_cal_refused_while_scanning, check_cal_refused_while_scanning),
     ("cal_mismatch", s_cal_sweep_mismatch, check_cal_sweep_mismatch),
 ]
@@ -515,11 +675,24 @@ def _child(faults_json: str, argv: list[str]) -> int:
         # the split-reply guard was added.
         import re
         pattern_measure.Positioner._POS_RE = re.compile(r"^\s*[-+]?\d")
+        # Also collapse seek() to a single attempt. The retry was added later,
+        # for a different fault, and it happens to rescue this one too: a bogus
+        # position reads as "not where I asked", the move is re-commanded, and
+        # the tower is already there. Leaving it on would make this control
+        # pass whatever the guard did, which is the exact failure mode the
+        # control exists to rule out. Isolate the guard by holding the second
+        # defence still. Patching the config default does not work - a
+        # dataclass bakes its defaults into __init__ at class creation.
+        pattern_measure.Positioner.seek = (
+            lambda self, deg, should_abort=None:
+                self._seek_once(deg, should_abort)[0])
 
     exc = ""
     try:
         if target == "cal":
             rc = _run_cal(argv)
+        elif target == "sweep":
+            rc = _run_sweep(argv)
         elif target == "service":
             rc = _run_service(argv)
         else:
@@ -534,12 +707,102 @@ def _child(faults_json: str, argv: list[str]) -> int:
         "rc": rc,
         "exc": exc,
         "stops": state.stops,
+        "seeks": state.seeks,
         "sweeps": state.sweeps,
         "trigger_restored": state.trigger_restored,
         "cals": state.cals,
         "cleared": state.collection_cleared,
         "cal": _CAL_RESULT.copy(),
+        "sweep": _SWEEP_RESULT.copy(),
     }), flush=True)
+    return 0
+
+
+_SWEEP_RESULT: dict = {}
+
+
+def _run_sweep(argv: list[str]) -> int:
+    """Drive the VNA-only sweep worker on the fake instruments.
+
+    Frames are captured rather than broadcast, the same way _run_cal does it,
+    because what this proves is in the payload: that all four parameters were
+    measured, that complex data survived to the client, and that the positioner
+    was never touched.
+    """
+    import asyncio
+    import warnings
+
+    import chamber_service as cs
+
+    warnings.filterwarnings("ignore", message=r"coroutine .* was never awaited")
+
+    no_pos = "--no-positioner" in argv
+    loop = asyncio.new_event_loop()
+    frames: list = []
+    try:
+        # Through build_backend rather than constructing directly, so the CLI
+        # wiring is covered too. It was not, once: --no-positioner reached
+        # argparse and stopped there, build_backend opened the tower anyway,
+        # and a scenario that built the backend by hand passed throughout.
+        import argparse
+        ns = argparse.Namespace(
+            sim=False, vna="TCPIP0::127.0.0.1::5025::SOCKET",
+            pos="ASRL16::INSTR", slot=1, device="A",
+            no_fallback=True, no_positioner=no_pos)
+        backend = cs.build_backend(ns)
+        assert backend.mode == "hw", "fell back to the simulator"
+        svc = cs.ChamberService(backend, loop)
+        svc.push = frames.append
+
+        refused = {}
+        if "--while-scanning" in argv:
+            import threading
+            svc._worker = threading.Thread(target=lambda: time.sleep(2))
+            svc._worker.start()
+            try:
+                svc.cmd_sweep({})
+            except Exception as e:
+                refused["sweep_vs_scan"] = str(e)
+            svc._worker.join()
+
+        if no_pos:
+            # The tower is the thing that is absent; prove the refusals are
+            # readable rather than an AttributeError from a None.
+            for name, fn in (("seek", lambda: backend.seek(10.0)),
+                             ("jog", lambda: svc.cmd_jog({"deg": 10.0})),
+                             ("zero", lambda: svc.cmd_zero_here({}))):
+                try:
+                    fn()
+                    refused[name] = ""
+                except Exception as e:
+                    refused[name] = f"{type(e).__name__}: {e}"
+
+        svc._run_sweep(cs.SweepRequest(start_hz=1e9, stop_hz=2e9, points=11))
+
+        _SWEEP_RESULT.update({
+            "types": [f.get("type") for f in frames],
+            "traces": [{"parameter": f["parameter"],
+                        "n_re": len(f["re"]), "n_im": len(f["im"]),
+                        "complex": any(v != 0.0 for v in f["im"])}
+                       for f in frames if f.get("type") == "sweep_trace"],
+            # Summarised, not echoed: the frame carries the frequency grid as
+            # a numpy array, which the real push serialises with _json_default
+            # and this harness's plain json.dumps does not.
+            "started": {
+                "n_freqs": len(st["freqs"]),
+                "parameters": list(st["parameters"]),
+                "correction": st["correction"],
+            } if (st := next((f for f in frames
+                              if f.get("type") == "sweep_started"), None)) else None,
+            "done": next((f for f in frames
+                          if f.get("type") == "sweep_done"), None),
+            "refused": refused,
+            "state": {k: (float(v) if hasattr(v, "dtype") else v)
+                      for k, v in svc.get_state().items()},
+            "pos_opened": backend.pos is not None,
+        })
+    finally:
+        loop.close()
     return 0
 
 
@@ -606,7 +869,9 @@ def _run_cal(argv: list[str]) -> int:
             finally:
                 stop2.set()
         else:
-            svc._run_cal(cs.CalRequest(reference_plane="rigcheck"))
+            ports = ((int(argv[argv.index("--ports") + 1]),)
+                     if "--ports" in argv else (1, 2))
+            svc._run_cal(cs.CalRequest(reference_plane="rigcheck", ports=ports))
 
         done = [f for f in frames if f.get("type") == "cal_done"]
         _CAL_RESULT.update({
@@ -657,12 +922,17 @@ def _run_service(argv: list[str]) -> int:
     cs.RUNS_DIR = outdir.parent
     step = float(argv[argv.index("--step") + 1])
 
+    def opt(flag, default):
+        return float(argv[argv.index(flag) + 1]) if flag in argv else default
+
+    start, stop = opt("--start", 0.0), opt("--stop", 270.0)
+
     loop = asyncio.new_event_loop()
     try:
         backend = cs.HardwareBackend("TCPIP0::127.0.0.1::5025::SOCKET",
                                      "ASRL16::INSTR", 1, "A")
         svc = cs.ChamberService(backend, loop)
-        svc._run_scan(cs.ScanRequest(start_deg=0.0, stop_deg=270.0,
+        svc._run_scan(cs.ScanRequest(start_deg=start, stop_deg=stop,
                                      step_deg=step, points=21,
                                      name=outdir.name))
     finally:
@@ -692,7 +962,9 @@ def run_one(name: str, setup, check, verbose: bool) -> tuple[bool, str]:
              "cals": payload.get("cals", []),
              "cleared": payload.get("cleared", 0),
              "cal": payload.get("cal", {}),
+             "sweep": payload.get("sweep", {}),
              "stops": payload.get("stops", []),
+             "seeks": payload.get("seeks", []),
              "sweeps": payload.get("sweeps", 0),
              "trigger_restored": payload.get("trigger_restored", False),
              "out": "\n".join(out),

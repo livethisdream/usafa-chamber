@@ -23,9 +23,14 @@ dependencies, and — on Windows — reports whether the rig is actually ready. 
 downloads or installs drivers for you; where something is missing it names the fault
 and where to get the fix.
 
-On a Linux acquisition PC, `./start.sh` then brings up S2VNA, the service and the
-dashboard in one go, checking each piece first; `./start.sh --sim` does the same
-with no instruments. Ctrl+C stops the service and frontend and leaves S2VNA open.
+`./start.sh` on Linux and `.\start.ps1` on Windows then bring up S2VNA, the service
+and the dashboard in one go, checking each piece first; `--sim` / `-Sim` does the
+same with no instruments. Ctrl+C stops the service and frontend and leaves S2VNA
+open, since restarting it means turning its socket server back on by hand.
+
+`start.ps1` discovers the positioner's COM port from the EMCenter's USB identity
+rather than taking it as a setting, because Windows renumbers the port per machine
+and per USB socket. Override with `-Pos ASRLn::INSTR` if you need to.
 
 `.\setup.ps1 -CheckOnly` diagnoses without changing anything, which is safe to run on
 the acquisition PC mid-session. Both scripts are idempotent.

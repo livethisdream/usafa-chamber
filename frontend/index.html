@@ -280,14 +280,13 @@
               <button class="tab-btn active" data-target="tab-pattern">Pattern Measurement</button>
               <button class="tab-btn" data-target="tab-vna">VNA</button>
               <button class="tab-btn" data-target="tab-turntable">Turntable</button>
+              <button class="tab-btn" data-target="tab-sweep">Sweep</button>
               <button class="tab-btn" data-target="tab-logs">Logs</button>
             </div>
           </div>
           <!-- Scan and STOP live here rather than in the accordion: STOP is the
                one control that must never be a scroll away. -->
           <div class="header-actions">
-            <span class="status-pill" id="mode-badge">offline</span>
-            <span class="status-pill" id="corr-badge" title="VNA error-correction state" hidden>CAL</span>
             <button class="btn btn-danger btn-small" id="btn-stop">STOP</button>
             <button class="btn btn-primary btn-small" id="btn-scan">Start scan</button>
           </div>
@@ -315,6 +314,48 @@
             </div>
           </div>
 
+          <!-- VNA-only capture: one sweep at the current position, all four
+               S-parameters, no positioner involvement at all. -->
+          <div class="chart-wrapper tab-content" id="tab-sweep">
+            <div class="tab-pane">
+              <div class="pane-header">
+                <h3>Sweep</h3>
+                <div class="pane-tools">
+                  <button class="btn btn-primary btn-small" id="btn-sweep"
+                          title="Capture at the sweep settings. The tower is not moved.">Sweep</button>
+                  <label class="inline-field"><span>Capture</span>
+                    <select class="modern-select" id="sweep-params">
+                      <option value="S11,S21,S12,S22">all four</option>
+                      <option value="S11">S11 only</option>
+                      <option value="S11,S21">S11 + S21</option>
+                      <option value="S22">S22 only</option>
+                    </select>
+                  </label>
+                  <label class="inline-field"><span>Marker</span>
+                    <select class="modern-select" id="sweep-marker"></select>
+                  </label>
+                  <button class="btn btn-outline btn-small" id="btn-sweep-export"
+                          title="Save the capture as a Touchstone .s2p file" disabled>Export</button>
+                </div>
+              </div>
+              <div class="pane-body sweep-body">
+                <div class="sweep-charts">
+                  <div id="chart-smith" class="chart"></div>
+                  <div id="chart-sweep-mag" class="chart"></div>
+                </div>
+                <div class="sweep-readout" id="sweep-readout">
+                  <div class="stat-box compact"><span class="stat-label">freq</span><span class="stat-value" id="sw-freq">—</span></div>
+                  <div class="stat-box compact"><span class="stat-label">Z</span><span class="stat-value" id="sw-z">—</span></div>
+                  <div class="stat-box compact"><span class="stat-label">|Γ|</span><span class="stat-value" id="sw-gamma">—</span></div>
+                  <div class="stat-box compact"><span class="stat-label">VSWR</span><span class="stat-value" id="sw-vswr">—</span></div>
+                  <div class="stat-box compact"><span class="stat-label">return loss</span><span class="stat-value" id="sw-rl">—</span></div>
+                  <div class="stats-spacer"></div>
+                  <span class="status-pill" id="sweep-state" hidden>capturing…</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div class="chart-wrapper tab-content" id="tab-vna">
             <div class="tab-pane">
               <div class="pane-header">
@@ -334,11 +375,11 @@
               <div class="pane-body dial-body">
                 <canvas id="dial"></canvas>
                 <div class="dial-readout">
-                  <div class="stat-box"><span class="stat-label">Commanded</span><span class="stat-value" id="stat-cmd">—</span></div>
-                  <div class="stat-box"><span class="stat-label">Actual</span><span class="stat-value" id="angle-readout">—</span></div>
-                  <div class="stat-box"><span class="stat-label">Speed</span><span class="stat-value" id="speed-readout">—</span></div>
-                  <div class="stat-box"><span class="stat-label">Grid</span><span class="stat-value" id="stat-grid">—</span></div>
-                  <div class="stat-box"><span class="stat-label">Remaining</span><span class="stat-value" id="stat-remaining">—</span></div>
+                  <div class="stat-box"><span class="stat-label">commanded</span><span class="stat-value" id="stat-cmd">—</span></div>
+                  <div class="stat-box"><span class="stat-label">actual</span><span class="stat-value" id="angle-readout">—</span></div>
+                  <div class="stat-box"><span class="stat-label">speed</span><span class="stat-value" id="speed-readout">—</span></div>
+                  <div class="stat-box"><span class="stat-label">grid</span><span class="stat-value" id="stat-grid">—</span></div>
+                  <div class="stat-box"><span class="stat-label">remaining</span><span class="stat-value" id="stat-remaining">—</span></div>
                 </div>
               </div>
             </div>
@@ -357,12 +398,16 @@
         </div>
 
         <div class="chart-stats">
-          <div class="stat-box compact"><span class="stat-label">Angle</span><span class="stat-value" id="stat-angle">—</span></div>
-          <div class="stat-box compact"><span class="stat-label">Cut</span><span class="stat-value" id="stat-cut">—</span></div>
-          <div class="stat-box compact"><span class="stat-label">Peak</span><span class="stat-value" id="stat-peak">—</span></div>
-          <div class="stat-box compact"><span class="stat-label">Progress</span><span class="stat-value" id="progress-label">idle</span></div>
+          <div class="stat-box compact"><span class="stat-label">angle</span><span class="stat-value" id="stat-angle">—</span></div>
+          <div class="stat-box compact"><span class="stat-label">cut</span><span class="stat-value" id="stat-cut">—</span></div>
+          <div class="stat-box compact"><span class="stat-label">peak</span><span class="stat-value" id="stat-peak">—</span></div>
+          <div class="stat-box compact"><span class="stat-label">progress</span><span class="stat-value" id="progress-label">idle</span></div>
           <div class="stat-box compact" id="stat-box-delta" hidden><span class="stat-label">Δ ref</span><span class="stat-value" id="stat-delta">—</span></div>
           <div class="stats-spacer"></div>
+          <!-- Backend, correction and link state read as one group: all three
+               answer "what am I actually talking to right now?" -->
+          <span class="status-pill" id="mode-badge">offline</span>
+          <span class="status-pill" id="corr-badge" title="VNA error-correction state" hidden>cal</span>
           <div class="status-indicator">
             <div class="dot" id="conn-dot" title="disconnected"></div>
             <span id="conn-text">disconnected</span>
@@ -393,6 +438,16 @@
 
           <hr class="divider" />
           <div class="control-group">
+            <label for="cal-ports">Calibration</label>
+            <select class="modern-select" id="cal-ports">
+              <option value="1,2">2-port (S11 S21 S12 S22)</option>
+              <option value="1">1-port, port 1 (reflection only)</option>
+              <option value="2">1-port, port 2 (reflection only)</option>
+            </select>
+          </div>
+          <p class="cal-note">A 1-port corrects reflection on that port alone and needs only that side of the module mated &mdash; the right choice for measuring S11 on a single antenna. A 2-port also corrects transmission, and is what a pattern measurement needs.</p>
+
+          <div class="control-group">
             <label for="cal-plane">Reference plane</label>
             <select class="modern-select" id="cal-plane">
               <option>cable ends inside the chamber</option>
@@ -404,8 +459,8 @@
           <hr class="divider" />
           <ol class="cal-checklist">
             <li>Stop the tower and confirm nothing is scanning.</li>
-            <li>Unmate the transmit horn and the AUT from the cable ends.</li>
-            <li>Mate the ACM2202 across those two ends.</li>
+            <li id="cal-step-unmate">Unmate the transmit horn and the AUT from the cable ends.</li>
+            <li id="cal-step-mate">Mate the ACM2202 across those two ends.</li>
             <li>Leave the chamber and close the door.</li>
           </ol>
           <label class="cal-confirm"><input type="checkbox" id="cal-ack" /> The module is connected and the chamber is clear.</label>

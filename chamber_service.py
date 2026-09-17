@@ -95,7 +95,9 @@ class CalRequest:
     if_bw_hz: float = 1.0e3
     power_dbm: float = 0.0
     parameter: str = "S21"
-    ports: tuple[int, int] = (1, 2)
+    # One port or two. A reflection measurement on a single antenna wants the
+    # 1-port: nothing is connected to the other side to calibrate against.
+    ports: tuple[int, ...] = (1, 2)
     orient: bool = False
     reference_plane: str = ""
 
@@ -103,7 +105,12 @@ class CalRequest:
     def from_args(cls, a: dict) -> "CalRequest":
         f = {k: a[k] for k in cls.__dataclass_fields__ if k in a}
         if "ports" in f:
-            f["ports"] = tuple(int(p) for p in f["ports"])[:2]
+            ports = tuple(dict.fromkeys(int(p) for p in f["ports"]))[:2]
+            if not ports:
+                raise BackendError("a calibration needs at least one port")
+            if any(p not in (1, 2) for p in ports):
+                raise BackendError(f"ports are 1 and 2, not {list(ports)}")
+            f["ports"] = ports
         return cls(**f)
 
     def sweep(self) -> dict:
@@ -113,6 +120,49 @@ class CalRequest:
 
     def as_scan(self) -> ScanRequest:
         return ScanRequest(**self.sweep())
+
+
+@dataclass
+class SweepRequest:
+    """One VNA capture at a fixed position, with no positioner involvement.
+
+    The tower is not addressed at all - not held, not read, not moved - so this
+    is the one measurement that works on a bench with only the VNA attached.
+
+    All four S-parameters by default. A Smith chart wants reflection and a
+    transmission measurement wants S21, and taking them in one capture is the
+    difference between a set that describes one instant and four that describe
+    four. `parameter` is absent on purpose: the request says which parameters,
+    plural, and `as_scan()` supplies a single one only because configure()
+    needs something to program before set_parameter() takes over.
+    """
+    start_hz: float = 2.0e9
+    stop_hz: float = 3.0e9
+    points: int = 101
+    if_bw_hz: float = 1.0e3
+    power_dbm: float = 0.0
+    parameters: tuple[str, ...] = ("S11", "S21", "S12", "S22")
+
+    @classmethod
+    def from_args(cls, a: dict) -> "SweepRequest":
+        f = {k: a[k] for k in cls.__dataclass_fields__ if k in a}
+        if "parameters" in f:
+            names = [str(p).upper() for p in f["parameters"]]
+            bad = [p for p in names if p not in ("S11", "S21", "S12", "S22")]
+            if bad:
+                raise BackendError(f"not S-parameters: {', '.join(bad)}")
+            if not names:
+                raise BackendError("a sweep with no parameters measures nothing")
+            f["parameters"] = tuple(dict.fromkeys(names))   # de-duped, ordered
+        return cls(**f)
+
+    def sweep(self) -> dict:
+        return {"start_hz": self.start_hz, "stop_hz": self.stop_hz,
+                "points": self.points, "if_bw_hz": self.if_bw_hz,
+                "power_dbm": self.power_dbm}
+
+    def as_scan(self) -> ScanRequest:
+        return ScanRequest(parameter=self.parameters[0], **self.sweep())
 
 
 # Fields whose disagreement between a calibration and a run matters. Power is
@@ -234,6 +284,14 @@ class SimBackend:
         return self._angle
 
     # -- measurement --------------------------------------------------------
+    has_positioner = True       # the simulated rig always has a simulated tower
+
+    def set_parameter(self, parameter: str) -> None:
+        # The synthetic pattern does not vary by S-parameter. Recorded so the
+        # payload names what it claims to have measured rather than silently
+        # relabelling one trace four times.
+        self._parameter = parameter
+
     def configure(self, req: ScanRequest) -> None:
         self._freqs = np.linspace(req.start_hz, req.stop_hz, req.points)
 
@@ -267,6 +325,19 @@ class SimBackend:
         mag = 10.0 ** (mag_db / 20.0)
         phase = np.radians((self._angle * 3.0 + np.linspace(0, 180, n)) % 360.0)
         time.sleep(0.06)                                  # stand in for a sweep
+
+        if getattr(self, "_parameter", "S21") in ("S11", "S22"):
+            # Reflection is not a pattern. The transmission model above peaks
+            # at |S21| ~ 1, and handing that back for S11 puts the trace
+            # outside the unit circle - a physically impossible passive load,
+            # and a Smith chart that cannot be developed against. Model a
+            # mismatched load behind a length of line instead: fixed magnitude,
+            # phase winding with frequency, which draws the arc a real one does.
+            gamma = 0.32 + 0.05 * (self._freqs - self._freqs[0]) / span
+            delay_s = 1.2e-9
+            wind = -2.0 * np.pi * 2.0 * delay_s * (self._freqs - self._freqs[0])
+            return gamma * np.exp(1j * (wind + math.radians(self._angle)))
+
         return mag * np.exp(1j * phase)
 
     def close(self) -> None:
@@ -280,7 +351,8 @@ class HardwareBackend:
 
     def __init__(self, vna_resource: str | None = None,
                  pos_resource: str | None = None,
-                 slot: int | None = None, device: str | None = None):
+                 slot: int | None = None, device: str | None = None,
+                 with_positioner: bool = True):
         import pyvisa
         self._rm = pyvisa.ResourceManager()
         vcfg = pm.VnaConfig()
@@ -297,22 +369,38 @@ class HardwareBackend:
 
         self._vcfg = vcfg
         self.vna = pm.Vna(self._rm, vcfg)
-        self.pos = pm.Positioner(self._rm, pcfg, cmds)
+        # A bench with only the VNA on it is a real configuration - a VNA-only
+        # capture never addresses the tower - so the positioner is optional.
+        # Asked for explicitly, never inferred: falling back to "no tower"
+        # because the EMCenter happened not to answer is how a pattern run
+        # turns into 72 sweeps of the same angle.
+        self.pos = pm.Positioner(self._rm, pcfg, cmds) if with_positioner else None
+
+    @property
+    def has_positioner(self) -> bool:
+        return self.pos is not None
+
+    def _require_positioner(self):
+        if self.pos is None:
+            raise BackendError(
+                "no positioner attached - the service was started with "
+                "--no-positioner, so nothing can turn the tower")
+        return self.pos
 
     def vna_idn(self) -> str:
         return self.vna.idn()
 
-    def pos_idn(self) -> str:
-        return self.pos.identity()
+    def pos_idn(self) -> str | None:
+        return self.pos.identity() if self.pos else None
 
-    def position(self) -> float:
-        return self.pos.position()
+    def position(self) -> float | None:
+        return self.pos.position() if self.pos else None
 
-    def speed(self) -> float:
-        return self.pos.speed()
+    def speed(self) -> float | None:
+        return self.pos.speed() if self.pos else None
 
-    def latched_error(self) -> str:
-        return self.pos.latched_error()
+    def latched_error(self) -> str | None:
+        return self.pos.latched_error() if self.pos else None
 
     def correction_state(self) -> str:
         return self.vna.correction_state()
@@ -337,16 +425,23 @@ class HardwareBackend:
                                       orient=req.orient, on_step=on_step)
 
     def set_speed(self, pct: float) -> None:
-        self.pos.set_speed(pct)
+        self._require_positioner().set_speed(pct)
 
     def zero_here(self) -> None:
-        self.pos.zero_here()
+        self._require_positioner().zero_here()
 
     def stop(self) -> None:
-        self.pos.stop()
+        # Not _require_positioner: stop is called on failure paths that do not
+        # know whether there is an axis, and raising there would replace the
+        # error being reported with one about the tower not existing.
+        if self.pos:
+            self.pos.stop()
 
     def seek(self, deg: float, should_abort=None) -> float:
-        return self.pos.seek(deg, should_abort=should_abort)
+        return self._require_positioner().seek(deg, should_abort=should_abort)
+
+    def set_parameter(self, parameter: str) -> None:
+        self.vna.set_parameter(parameter)
 
     def configure(self, req: ScanRequest) -> None:
         k = self._vcfg
@@ -366,7 +461,8 @@ class HardwareBackend:
         try:
             self.vna.close()
         finally:
-            self.pos.close()
+            if self.pos:
+                self.pos.close()
 
 
 # --------------------------------------------------------------------------
@@ -392,6 +488,8 @@ class ChamberService:
         self._worker: threading.Thread | None = None
         self._cal_cancel = threading.Event()
         self._cal_worker: threading.Thread | None = None
+        self._sweep_cancel = threading.Event()
+        self._sweep_worker: threading.Thread | None = None
         self._lock = threading.Lock()
         self.last_run: dict | None = None
         self.calibration: dict | None = _load_calibration()
@@ -425,19 +523,31 @@ class ChamberService:
     def calibrating(self) -> bool:
         return self._cal_worker is not None and self._cal_worker.is_alive()
 
+    @property
+    def sweeping(self) -> bool:
+        return self._sweep_worker is not None and self._sweep_worker.is_alive()
+
     def get_state(self) -> dict:
+        has_pos = getattr(self.backend, "has_positioner", True)
         st = {"mode": self.backend.mode, "scanning": self.scanning,
-              "calibrating": self.calibrating, "calibration": self.calibration}
+              "calibrating": self.calibrating, "sweeping": self.sweeping,
+              "calibration": self.calibration, "has_positioner": has_pos}
         try:
             st.update({
                 "vna_idn": self.backend.vna_idn(),
-                "pos_idn": self.backend.pos_idn(),
-                "angle": round(self.backend.position(), 2),
-                "speed": round(self.backend.speed(), 1),
-                "latched_error": self.backend.latched_error(),
                 "correction": self.backend.correction_state(),
                 "connected": True,
             })
+            # Read in its own block. These four used to share the VNA's try,
+            # so a rig with no tower reported the whole service as
+            # disconnected - including the VNA that was answering perfectly.
+            if has_pos:
+                st.update({
+                    "pos_idn": self.backend.pos_idn(),
+                    "angle": round(self.backend.position(), 2),
+                    "speed": round(self.backend.speed(), 1),
+                    "latched_error": self.backend.latched_error(),
+                })
         except Exception as e:
             st.update({"connected": False, "error": f"{type(e).__name__}: {e}"})
         return st
@@ -475,16 +585,28 @@ class ChamberService:
             # Both directions. The instruments are single-threaded and stateful,
             # and a calibration has a person with their hands on the connectors.
             raise BackendError("a calibration is running; cancel it first")
+        if self.sweeping:
+            # Every direction, not just the newest one. A guard that only knows
+            # about the workers that existed when it was written is how two
+            # things end up programming the same VNA at once.
+            raise BackendError("a sweep is running; cancel it first")
 
     def cmd_jog(self, a: dict) -> dict:
         self._require_idle()
         with self._lock:
             if "delta" in a:
-                target = self.backend.position() + float(a["delta"])
+                # A delta can walk off the end of the travel - +10 from 175 -
+                # so fold it back into the -180..180 the card is set to.
+                target = pm._wrap180(self.backend.position() + float(a["delta"]))
             else:
+                # Absolute targets go exactly as asked. This used to be
+                # `target % 360.0`, which turned -90 into 270: the same place,
+                # reached by turning the opposite way. The tower has a cable
+                # through it, so the direction of travel is the whole point,
+                # and 270 is not a synonym for -90.
                 target = float(a["deg"])
             self._cancel.clear()
-            actual = self.backend.seek(target % 360.0,
+            actual = self.backend.seek(target,
                                        should_abort=self._cancel.is_set)
         self.push({"type": "position", "deg": round(actual, 2)})
         return {"angle": round(actual, 2)}
@@ -560,14 +682,100 @@ class ChamberService:
         self.log("warn", "cal", "Cancel requested - stops after the current step")
         return {"cancelled": True}
 
+    # -- VNA-only sweep -----------------------------------------------------
+    def cmd_sweep(self, a: dict) -> dict:
+        self._require_idle()
+        req = SweepRequest.from_args(a)
+        self._sweep_cancel.clear()
+        self._sweep_worker = threading.Thread(
+            target=self._run_sweep, args=(req,), daemon=True,
+            name="chamber-sweep")
+        self._sweep_worker.start()
+        return {"started": True, "parameters": list(req.parameters)}
+
+    def cmd_cancel_sweep(self, _a: dict) -> dict:
+        """Stop after the current parameter.
+
+        A single sweep is one blocking SCPI exchange with nowhere to poll, so
+        this declines to start the next parameter rather than interrupting the
+        one in flight. With four parameters that is a real thing to be able to
+        do; with one it is barely distinguishable from waiting.
+        """
+        if not self.sweeping:
+            return {"cancelled": False, "reason": "no sweep running"}
+        self._sweep_cancel.set()
+        self.log("warn", "sweep", "Cancel requested - stops after this parameter")
+        return {"cancelled": True}
+
+    def _run_sweep(self, req: SweepRequest) -> None:
+        """Capture every requested S-parameter at one position.
+
+        The positioner is never addressed - not read, not held, not moved - so
+        this is the measurement that works with only a VNA attached. Complex
+        data goes out as it is measured: a Smith chart needs re/im, and the
+        scan path's habit of shipping magnitude alone is what made reflection
+        impossible to look at.
+        """
+        try:
+            with self._lock:
+                self.backend.configure(req.as_scan())
+                freqs = self.backend.frequencies()
+                correction = self.backend.correction_state()
+
+            mismatch = cal_mismatch(self.calibration, req)
+            self.push({"type": "sweep_started",
+                       "freqs": freqs,
+                       "parameters": list(req.parameters),
+                       "sweep": req.sweep(),
+                       "correction": correction,
+                       "cal_mismatch": mismatch,
+                       "mode": self.backend.mode})
+            self.log("info", "sweep",
+                     f"{', '.join(req.parameters)} at {req.points} pts, "
+                     f"{req.start_hz / 1e9:.3f}-{req.stop_hz / 1e9:.3f} GHz")
+            for m in mismatch:
+                self.log("warn", "vna",
+                         f"this sweep does not match the calibration: {m}")
+            corr_on = pm.correction_is_on(correction)
+            if corr_on is False:
+                self.log("warn", "vna", f"error correction is OFF ({correction}) "
+                                        f"- this sweep is uncalibrated")
+
+            for i, parameter in enumerate(req.parameters):
+                if self._sweep_cancel.is_set():
+                    self.log("warn", "sweep", f"cancelled after {i} parameter(s)")
+                    self.push({"type": "sweep_done", "cancelled": True,
+                               "n_done": i})
+                    return
+                with self._lock:
+                    self.backend.set_parameter(parameter)
+                    s = self.backend.measure()
+                self.push({"type": "sweep_trace",
+                           "index": i,
+                           "parameter": parameter,
+                           "re": [float(v.real) for v in s],
+                           "im": [float(v.imag) for v in s]})
+
+            self.push({"type": "sweep_done", "cancelled": False,
+                       "n_done": len(req.parameters),
+                       "correction": correction})
+            self.log("info", "sweep", "capture complete")
+
+        except Exception as e:
+            self.log("error", "sweep", f"{type(e).__name__}: {e}")
+            self.push({"type": "sweep_done", "cancelled": True,
+                       "error": str(e)})
+
     def _run_cal(self, req: CalRequest) -> None:
         started = time.strftime("%Y-%m-%d %H:%M:%S")
         self.push({"type": "cal_started", "sweep": req.sweep(),
                    "ports": list(req.ports),
                    "reference_plane": req.reference_plane,
                    "mode": self.backend.mode})
-        self.log("info", "cal", f"AutoCal on ports {req.ports[0]} and "
-                                f"{req.ports[1]}, {req.points} pts, "
+        where = (f"port {req.ports[0]}" if len(req.ports) == 1
+                 else f"ports {req.ports[0]} and {req.ports[1]}")
+        self.log("info", "cal", f"{len(req.ports)}-port AutoCal on {where}, "
+                                f"{req.points} pts, "
                                 f"{req.start_hz/1e9:.3f}-{req.stop_hz/1e9:.3f} GHz")
 
         def step(msg: str) -> None:
@@ -588,7 +796,7 @@ class ChamberService:
 
             record = {"taken_at": started,
                       "finished": time.strftime("%Y-%m-%d %H:%M:%S"),
-                      "method": "ecal_solt2",
+                      "method": f"ecal_solt{len(req.ports)}",
                       "ports": list(req.ports),
                       "reference_plane": req.reference_plane,
                       "module": module,
@@ -755,6 +963,8 @@ class ChamberService:
         "acm_probe": "cmd_acm_probe",
         "start_cal": "cmd_start_cal",
         "cancel_cal": "cmd_cancel_cal",
+        "sweep": "cmd_sweep",
+        "cancel_sweep": "cmd_cancel_sweep",
     }
 
     async def handle(self, msg: str) -> str | None:
@@ -851,8 +1061,10 @@ def build_backend(a) -> Any:
         print("backend: SIMULATED (forced with --sim)")
         return SimBackend()
     try:
-        b = HardwareBackend(a.vna, a.pos, a.slot, a.device)
-        print(f"backend: hardware\n  VNA {b.vna_idn()}\n  POS {b.pos_idn()}")
+        b = HardwareBackend(a.vna, a.pos, a.slot, a.device,
+                            with_positioner=not a.no_positioner)
+        pos = b.pos_idn() if b.has_positioner else "none (--no-positioner)"
+        print(f"backend: hardware\n  VNA {b.vna_idn()}\n  POS {pos}")
         return b
     except pm.InstrumentUnavailable as e:
         # These carry an instruction, not just a status code. Print the
@@ -879,6 +1091,11 @@ def main(argv=None) -> int:
                    help="use the simulated backend; no instruments required")
     p.add_argument("--no-fallback", action="store_true",
                    help="fail instead of falling back to the simulator")
+    p.add_argument("--no-positioner", action="store_true",
+                   help="VNA only: do not open the positioner at all. Sweeps "
+                        "work, scans and jogs are refused. Asked for "
+                        "explicitly, never inferred from a tower that failed "
+                        "to answer.")
     p.add_argument("--vna", default=None)
     p.add_argument("--pos", default=None)
     p.add_argument("--slot", type=int, default=None)

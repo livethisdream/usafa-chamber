@@ -120,7 +120,7 @@ h1, h2, h3 { font-family: 'Outfit', 'Inter', sans-serif; }
 .status-indicator { font-weight: 500; }
 
 .status-pill[data-mode="sim"] { color: var(--warn); border-color: rgba(245,158,11,.4); background: rgba(245,158,11,.1); }
-.status-pill[data-mode="hardware"] { color: var(--success); border-color: rgba(16,185,129,.4); background: rgba(16,185,129,.1); }
+.status-pill[data-mode="hw"] { color: var(--success); border-color: rgba(16,185,129,.4); background: rgba(16,185,129,.1); }
 .status-pill.moving { color: var(--warn); border-color: rgba(245,158,11,.4); background: rgba(245,158,11,.1); }
 .status-pill.scanning { color: var(--secondary); border-color: rgba(0,136,209,.45); background: rgba(0,136,209,.12); }
 /* chamber-specific: error-correction state. Uncalibrated is a warning, not an
@@ -625,11 +625,14 @@ h1, h2, h3 { font-family: 'Outfit', 'Inter', sans-serif; }
   align-items: center;
   text-align: center;
 }
+/* Labels are lowercase in the markup rather than transformed, so the delta in
+   "Δ ref" survives - text-transform: lowercase would render it as a small
+   delta, which means something else. Tracking is lighter than it was for the
+   uppercase form, which needed the air; lowercase does not. */
 .stat-label {
   font-size: 0.6rem;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
+  letter-spacing: 0.3px;
 }
 .stat-value {
   font-size: 0.86rem;
@@ -775,3 +778,28 @@ h1, h2, h3 { font-family: 'Outfit', 'Inter', sans-serif; }
   cursor: pointer;
 }
 .cal-log { height: 170px; flex: none; }
+
+/* --- VNA-only sweep -------------------------------------------------------
+   Two charts side by side: the Smith chart is square by nature, the magnitude
+   plot is not, so they get a fixed split rather than an even one. Below ~900px
+   they stack, because a Smith chart squeezed into half a phone is unreadable. */
+.sweep-body { display: flex; flex-direction: column; min-height: 0; }
+.sweep-charts {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 0.6rem;
+  min-height: 0;
+}
+.sweep-charts > .chart { min-width: 0; min-height: 0; }
+.sweep-readout {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+  flex-shrink: 0;
+}
+@media (max-width: 900px) {
+  .sweep-charts { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+}

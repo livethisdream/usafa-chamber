@@ -67,7 +67,16 @@ unless you pass `--allow-motion`.
 
 ## 6. Start the dashboard
 
-Two terminals, both in the project folder (replace `n` and the VNA port as noted):
+```powershell
+.\start.ps1
+```
+
+Brings up S2VNA, the service and the dashboard together, finding the positioner's
+COM port itself. Make a desktop shortcut to it and the whole rig starts from one
+icon. Ctrl+C stops the service and frontend; S2VNA stays open.
+
+To run the two halves by hand instead — two terminals, both in the project folder
+(replace `n` and the VNA port as noted):
 
 ```powershell
 .\.venv-win\Scripts\python.exe chamber_service.py --no-fallback --vna TCPIP0::127.0.0.1::5025::SOCKET --pos ASRLn::INSTR

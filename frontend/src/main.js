@@ -33,7 +33,19 @@ const state = {
     lastAngle: null,
     commanded: null,
     done: 0,
+    // VNA-only capture. sweepData is keyed by S-parameter, each {re, im}.
+    sweeping: false,
+    hasPositioner: true,
+    sweepFreqs: [],
+    sweepData: {},
+    sweepMarker: 0,
 };
+
+// Reference impedance. The A2202-Fx is a 50 ohm instrument and nothing in this
+// project changes that, so it is a constant rather than a setting nobody would
+// ever move.
+const Z0 = 50;
+const REFLECTION = ['S11', 'S22'];
 
 // The imported comparison pattern: every cut in the file, plus which one is
 // selected. Display-side only — the service never learns a comparison is on.
@@ -103,7 +115,45 @@ function initPlots() {
         yaxis: { title: { text: 'Magnitude (dB)', font: { size: 10 } },
                  gridcolor: c.grid, zerolinecolor: c.grid },
     }, PLOT_CONFIG);
+
+    // Smith chart: reflection only. Plotting S21 on one is meaningless - a
+    // transmission coefficient is not a load impedance - so the traces are
+    // fixed to S11 and S22 rather than following whatever was captured.
+    Plotly.newPlot('chart-smith', REFLECTION.map((name, i) => ({
+        type: 'scattersmith', mode: 'lines', real: [], imag: [], name,
+        line: { color: i === 0 ? c.primary : c.reference, width: 1.8 },
+    })).concat([{
+        // The marker, drawn as its own trace so moving it does not redraw the
+        // sweep underneath it.
+        type: 'scattersmith', mode: 'markers', real: [], imag: [], name: 'marker',
+        marker: { color: c.secondary, size: 9 },
+    }]), {
+        ...baseLayout(),
+        margin: { l: 24, r: 24, t: 16, b: 24 },
+        smith: {
+            bgcolor: 'rgba(0,0,0,0)',
+            realaxis: { gridcolor: c.grid, linecolor: c.grid, tickfont: { size: 9 } },
+            imaginaryaxis: { gridcolor: c.grid, linecolor: c.grid, tickfont: { size: 9 } },
+        },
+    }, PLOT_CONFIG);
+
+    Plotly.newPlot('chart-sweep-mag', SWEEP_PARAMS.map((name, i) => ({
+        type: 'scatter', mode: 'lines', x: [], y: [], name,
+        line: { color: SWEEP_COLORS(c)[i], width: 1.6 },
+    })), {
+        ...baseLayout(),
+        showlegend: true,
+        legend: { orientation: 'h', y: 1.12, x: 0, font: { size: 10 } },
+        margin: { l: 48, r: 12, t: 28, b: 40 },
+        xaxis: { title: { text: 'Frequency (GHz)', font: { size: 10 } },
+                 gridcolor: c.grid, zerolinecolor: c.grid },
+        yaxis: { title: { text: 'Magnitude (dB)', font: { size: 10 } },
+                 gridcolor: c.grid, zerolinecolor: c.grid },
+    }, PLOT_CONFIG);
 }
+
+const SWEEP_PARAMS = ['S11', 'S21', 'S12', 'S22'];
+const SWEEP_COLORS = (c) => [c.primary, c.secondary, c.reference, c.muted];
 
 function restylePlots() {
     const c = themeColors();
@@ -121,6 +171,21 @@ function restylePlots() {
         'yaxis.gridcolor': c.grid, 'yaxis.zerolinecolor': c.grid,
     });
     Plotly.restyle('chart-rect', { 'line.color': c.secondary });
+    Plotly.relayout('chart-smith', {
+        'font.color': c.muted,
+        'smith.realaxis.gridcolor': c.grid, 'smith.realaxis.linecolor': c.grid,
+        'smith.imaginaryaxis.gridcolor': c.grid,
+        'smith.imaginaryaxis.linecolor': c.grid,
+    });
+    Plotly.restyle('chart-smith', { 'line.color': [c.primary, c.reference] }, [0, 1]);
+    Plotly.restyle('chart-smith', { 'marker.color': c.secondary }, [2]);
+    Plotly.relayout('chart-sweep-mag', {
+        'font.color': c.muted,
+        'xaxis.gridcolor': c.grid, 'xaxis.zerolinecolor': c.grid,
+        'yaxis.gridcolor': c.grid, 'yaxis.zerolinecolor': c.grid,
+    });
+    Plotly.restyle('chart-sweep-mag', { 'line.color': SWEEP_COLORS(c) },
+                   SWEEP_PARAMS.map((_, i) => i));
     dial.draw();
 }
 
@@ -395,17 +460,17 @@ function setCorrection(raw, mode) {
     badge.hidden = false;
     if (on === true) {
         kv.textContent = `on (${raw})`;
-        badge.textContent = 'CAL';
+        badge.textContent = 'cal';
         badge.className = 'status-pill corr-on';
         badge.title = 'error correction on - this run is calibrated';
     } else if (on === false) {
-        kv.textContent = `OFF (${raw})`;
-        badge.textContent = 'UNCAL';
+        kv.textContent = `off (${raw})`;
+        badge.textContent = 'uncal';
         badge.className = 'status-pill corr-off';
         badge.title = 'error correction off - this run is uncalibrated';
     } else {
         kv.textContent = `unknown (${raw})`;
-        badge.textContent = 'CAL?';
+        badge.textContent = 'cal?';
         badge.className = 'status-pill corr-unknown';
         badge.title = 'the VNA did not answer SENS:CORR:STAT?';
     }
@@ -429,8 +494,23 @@ function calParams() {
         if_bw_hz: parseFloat($('f-ifbw').value),
         power_dbm: parseFloat($('f-power').value),
         parameter: $('f-param').value,
+        ports: $('cal-ports').value.split(',').map(Number),
         reference_plane: $('cal-plane').value,
     };
+}
+
+/** The checklist depends on how many ports are being calibrated: a 1-port needs
+ *  one cable end on the module, not both, and saying "mate it across the two
+ *  ends" for a 1-port sends somebody to disconnect an antenna for no reason. */
+function renderCalChecklist() {
+    const one = $('cal-ports').value.split(',').length === 1;
+    const port = $('cal-ports').value.split(',')[0];
+    $('cal-step-unmate').textContent = one
+        ? `Unmate whatever is on the port ${port} cable end.`
+        : 'Unmate the transmit horn and the AUT from the cable ends.';
+    $('cal-step-mate').textContent = one
+        ? `Mate one port of the ACM2202 to that end.`
+        : 'Mate the ACM2202 across those two ends.';
 }
 
 /** Which sweep settings a prospective run does not share with the cal. Mirrors
@@ -523,14 +603,18 @@ function calLog(text) {
 
 function applyState(s) {
     if (!s) return;
-    $('mode-badge').textContent = s.mode === 'sim' ? 'SIMULATED' : 'HARDWARE';
+    $('mode-badge').textContent = s.mode === 'sim' ? 'simulated' : 'hardware';
     $('mode-badge').dataset.mode = s.mode;
     state.mode = s.mode;
     $('vna-idn').textContent = s.vna_idn || '—';
-    $('pos-idn').textContent = s.pos_idn || '—';
-    $('pos-err').textContent = s.latched_error ?? '—';
+    state.hasPositioner = s.has_positioner !== false;
+    $('pos-idn').textContent = state.hasPositioner
+        ? (s.pos_idn || '—') : 'not attached (--no-positioner)';
+    $('pos-err').textContent = state.hasPositioner ? (s.latched_error ?? '—') : '—';
+    applyPositionerPresence();
     setCorrection(s.correction, s.mode);
     state.calibrating = !!s.calibrating;
+    state.sweeping = !!s.sweeping;
     state.calibration = s.calibration || null;
     renderCalibration();
     if (s.angle != null) setPosition(s.angle);
@@ -552,20 +636,48 @@ const SCAN_INPUTS = ['f-start', 'f-stop', 'f-points', 'f-ifbw', 'f-power', 'f-pa
                      'a-start', 'a-stop', 'a-step', 'a-speed', 'jog-abs', 'btn-goto',
                      'btn-zero', 'run-name'];
 
+
+/**
+ * Grey out everything that turns the tower when there is no tower.
+ *
+ * Disabled and explained, not hidden: a control that vanishes looks like a
+ * missing feature, and the operator has no way to tell that from a broken UI.
+ */
+function applyPositionerPresence() {
+    const none = !state.hasPositioner;
+    const POS_CONTROLS = ['a-start', 'a-stop', 'a-step', 'a-speed', 'jog-abs',
+                          'btn-goto', 'btn-zero', 'btn-scan'];
+    if (none) {
+        POS_CONTROLS.forEach((id) => { const el = $(id); if (el) el.disabled = true; });
+        document.querySelectorAll('[data-jog]').forEach((b) => { b.disabled = true; });
+        $('btn-scan').textContent = 'no positioner';
+        $('btn-scan').title = 'The service was started with --no-positioner. '
+                            + 'Sweeps work; nothing can turn the tower.';
+    }
+}
+
 function syncControls() {
-    const busy = state.scanning || state.calibrating || !state.connected;
+    const busy = state.scanning || state.calibrating || state.sweeping
+              || !state.connected;
     SCAN_INPUTS.forEach((id) => { const el = $(id); if (el) el.disabled = busy; });
     document.querySelectorAll('[data-jog]').forEach((b) => { b.disabled = busy; });
     $('btn-scan').disabled = busy;
     $('btn-scan').textContent = state.scanning ? 'Scanning…'
-                             : state.calibrating ? 'Calibrating…' : 'Start scan';
+                             : state.calibrating ? 'Calibrating…'
+                             : state.sweeping ? 'Sweeping…' : 'Start scan';
     $('btn-cal').disabled = busy;
+    $('btn-sweep').disabled = busy;
+    $('btn-sweep').textContent = state.sweeping ? 'Sweeping…' : 'Sweep';
+    // A sweep never touches the tower, so it stays available on a rig that
+    // has none. Everything that turns something does not.
+    if (!state.hasPositioner) applyPositionerPresence();
     // Stop stays enabled whenever there is a link: it is the one control that
     // must always be reachable, and the service preempts rather than queues.
     $('btn-stop').disabled = !state.connected;
 
     const pill = $('pill-motion');
-    pill.textContent = state.scanning ? 'scanning' : 'stopped';
+    pill.textContent = state.scanning ? 'scanning'
+                     : state.sweeping ? 'sweeping' : 'stopped';
     pill.className = `status-pill${state.scanning ? ' scanning' : ''}`;
 }
 
@@ -616,6 +728,9 @@ const transport = createTransport({
         syncControls();
     },
     onCalStep: (m) => calLog(m.message),
+    onSweepStarted,
+    onSweepTrace,
+    onSweepDone,
     onCalDone: (m) => {
         state.calibrating = false;
         calStage('done');
@@ -825,6 +940,25 @@ function scanParams() {
     return p;
 }
 
+/**
+ * The sweep takes its frequency settings from the same VNA panel a scan does,
+ * so a capture and a scan cannot silently disagree about what was measured.
+ * The Parameter dropdown is not consulted: a capture takes all four.
+ */
+function sweepParams() {
+    return {
+        // One sweep per parameter, so asking for four when you want one costs
+        // four times the wait. An S11-only measurement on a single antenna is
+        // the common case and there is no port 2 to measure anyway.
+        parameters: $('sweep-params').value.split(','),
+        start_hz: parseFloat($('f-start').value) * 1e9,
+        stop_hz: parseFloat($('f-stop').value) * 1e9,
+        points: parseInt($('f-points').value, 10),
+        if_bw_hz: parseFloat($('f-ifbw').value),
+        power_dbm: parseFloat($('f-power').value),
+    };
+}
+
 function refreshRuns() {
     guard(() => transport.listRuns()).then((r) => renderRuns(r?.runs || []));
 }
@@ -872,9 +1006,207 @@ async function loadRun(name) {
     addLog('info', 'runs', `loaded ${name}: ${d.angles.length} angles`);
 }
 
+
+// ---------------------------------------------------------------------------
+// VNA-only sweep: Smith chart, magnitude, and the impedance behind a marker.
+//
+// The service ships complex S-parameters and nothing else. Everything derived -
+// dB, impedance, VSWR, return loss - is computed here, so the payload stays a
+// measurement rather than a measurement plus somebody's arithmetic.
+// ---------------------------------------------------------------------------
+
+function db(re, im) {
+    return 20 * Math.log10(Math.max(Math.hypot(re, im), 1e-15));
+}
+
+/**
+ * Load impedance behind a reflection coefficient: Z = Z0 (1 + G) / (1 - G).
+ *
+ * A short is G = -1, where the denominator is zero and Z is genuinely zero, so
+ * the singular case is real rather than a rounding artefact and is reported as
+ * such instead of as Infinity.
+ */
+function gammaToZ(re, im) {
+    const dr = 1 - re, di = -im;
+    const den = dr * dr + di * di;
+    if (den < 1e-18) return { r: Infinity, x: Infinity };
+    const nr = 1 + re, ni = im;
+    return {
+        r: Z0 * (nr * dr + ni * di) / den,
+        x: Z0 * (ni * dr - nr * di) / den,
+    };
+}
+
+function fmtOhms(z) {
+    if (!Number.isFinite(z.r) || !Number.isFinite(z.x)) return 'open';
+    const sign = z.x >= 0 ? '+' : '−';
+    return `${z.r.toFixed(1)} ${sign} j${Math.abs(z.x).toFixed(1)}`;
+}
+
+function populateSweepMarker() {
+    const sel = $('sweep-marker');
+    const f = state.sweepFreqs;
+    sel.innerHTML = '';
+    f.forEach((hz, i) => {
+        const o = document.createElement('option');
+        o.value = String(i);
+        o.textContent = `${(hz / 1e9).toFixed(4)} GHz`;
+        sel.appendChild(o);
+    });
+    if (state.sweepMarker >= f.length) state.sweepMarker = Math.max(0, f.length - 1);
+    sel.value = String(state.sweepMarker);
+}
+
+function redrawSweep() {
+    const f = state.sweepFreqs;
+    if (!f.length) return;
+    const ghz = f.map((hz) => hz / 1e9);
+
+    // Magnitude: one trace per parameter, empty for any not captured.
+    Plotly.update('chart-sweep-mag', {
+        x: SWEEP_PARAMS.map(() => ghz),
+        y: SWEEP_PARAMS.map((name) => {
+            const d = state.sweepData[name];
+            return d ? d.re.map((re, i) => db(re, d.im[i])) : [];
+        }),
+    }, {}, SWEEP_PARAMS.map((_, i) => i));
+
+    // Smith: reflection parameters plus the marker point.
+    const i = state.sweepMarker;
+    const primary = state.sweepData.S11 || state.sweepData.S22;
+    Plotly.update('chart-smith', {
+        real: REFLECTION.map((n) => (state.sweepData[n] || { re: [] }).re)
+            .concat([primary ? [primary.re[i]] : []]),
+        imag: REFLECTION.map((n) => (state.sweepData[n] || { im: [] }).im)
+            .concat([primary ? [primary.im[i]] : []]),
+    }, {}, [0, 1, 2]);
+
+    renderSweepReadout();
+}
+
+function renderSweepReadout() {
+    const i = state.sweepMarker;
+    const f = state.sweepFreqs;
+    // S11 is the readout's subject; S22 only if S11 was not captured. Averaging
+    // the two would describe a port that does not exist.
+    const d = state.sweepData.S11 || state.sweepData.S22;
+    const blank = !d || !f.length;
+    $('sw-freq').textContent = blank ? '—' : `${(f[i] / 1e9).toFixed(4)} GHz`;
+    if (blank) {
+        ['sw-z', 'sw-gamma', 'sw-vswr', 'sw-rl'].forEach((id) => {
+            $(id).textContent = '—';
+        });
+        return;
+    }
+    const re = d.re[i], im = d.im[i];
+    const mag = Math.hypot(re, im);
+    const z = gammaToZ(re, im);
+    $('sw-z').textContent = `${fmtOhms(z)} Ω`;
+    $('sw-gamma').textContent = mag.toFixed(4);
+    // A passive load cannot reflect more than it receives. Measured slightly
+    // over 1 means noise or a stale calibration, and quoting a negative VSWR
+    // from it would dress that up as a number.
+    $('sw-vswr').textContent = mag >= 1 ? '∞' : ((1 + mag) / (1 - mag)).toFixed(2);
+    $('sw-rl').textContent = `${(-20 * Math.log10(Math.max(mag, 1e-15))).toFixed(2)} dB`;
+}
+
+/**
+ * Touchstone .s2p, written in the browser from what is already here.
+ *
+ * Deliberately not the service's _write_s2p: that one zeroes three of the four
+ * parameters because a scan only ever measures one, and writing a file that
+ * claims a full 2-port set it does not have is worse than not writing one.
+ * A capture has all four, so this is a real .s2p.
+ */
+function exportTouchstone() {
+    const f = state.sweepFreqs;
+    if (!f.length) return;
+
+    // A capture of one reflection parameter is a 1-port measurement, and
+    // Touchstone has a format for that. Writing it as .s2p with the other
+    // three columns zeroed would hand somebody a file claiming a through path
+    // of exactly zero and an infinitely reflective port 2 - numbers a reader
+    // will happily plot. Which parameter it is goes in the header, because
+    // .s1p itself cannot say whether it is S11 or S22.
+    const have = SWEEP_PARAMS.filter((n) => state.sweepData[n]);
+    const onePort = have.length === 1 && REFLECTION.includes(have[0]);
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const cal = state.calibration;
+    const lines = [
+        `! USAFA chamber VNA capture ${stamp}`,
+        `! ${state.mode === 'sim' ? 'SIMULATED - not a measurement' : 'hardware'}`,
+        `! measured: ${have.join(' ')}`,
+    ];
+    if (cal) {
+        lines.push(`! calibration: ${cal.method || 'unknown'}`
+                 + ` ports ${(cal.ports || []).join('+') || '?'}`
+                 + `, plane: ${cal.reference_plane || 'not stated'}`);
+    } else {
+        lines.push('! calibration: none recorded by this service');
+    }
+    if (!onePort) {
+        const need = SWEEP_PARAMS.filter((n) => !state.sweepData[n]);
+        lines.push(need.length
+            ? `! NOT MEASURED, written as zero: ${need.join(' ')}`
+            : '! all four parameters measured');
+    }
+    lines.push('# HZ S RI R 50');
+
+    const at = (name, i) => {
+        const d = state.sweepData[name];
+        return d ? [d.re[i], d.im[i]] : [0, 0];
+    };
+    // Touchstone 2-port column order is S11 S21 S12 S22 - not the order a
+    // reader expects, and the usual source of transposed data.
+    const cols = onePort ? have : ['S11', 'S21', 'S12', 'S22'];
+    f.forEach((hz, i) => {
+        const vals = cols.map((n) => at(n, i).map((v) => v.toExponential(9)).join(' '));
+        lines.push(`${hz.toFixed(0)} ${vals.join(' ')}`);
+    });
+
+    const blob = new Blob([lines.join('\n') + '\n'], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `sweep_${stamp}.${onePort ? 's1p' : 's2p'}`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    addLog('info', 'sweep', `exported ${a.download} (${have.join(' ')})`);
+}
+
+function onSweepStarted(m) {
+    state.sweeping = true;
+    state.sweepFreqs = m.freqs || [];
+    state.sweepData = {};
+    state.sweepMarker = 0;
+    populateSweepMarker();
+    $('sweep-state').hidden = false;
+    $('btn-sweep-export').disabled = true;
+    (m.cal_mismatch || []).forEach((w) =>
+        addLog('warn', 'vna', `this sweep does not match the calibration: ${w}`));
+    syncControls();
+}
+
+function onSweepTrace(m) {
+    state.sweepData[m.parameter] = { re: m.re, im: m.im };
+    redrawSweep();
+}
+
+function onSweepDone(m) {
+    state.sweeping = false;
+    $('sweep-state').hidden = true;
+    $('btn-sweep-export').disabled = !Object.keys(state.sweepData).length;
+    if (m.error) addLog('error', 'sweep', m.error);
+    else if (m.cancelled) addLog('warn', 'sweep', 'capture cancelled');
+    redrawSweep();
+    syncControls();
+}
+
 function resizeAll() {
     Plotly.Plots.resize('chart-polar');
     Plotly.Plots.resize('chart-rect');
+    Plotly.Plots.resize('chart-smith');
+    Plotly.Plots.resize('chart-sweep-mag');
     dial.resize();
 }
 
@@ -900,7 +1232,19 @@ function wire() {
         guard(() => transport.jog({ deg: v }));
     });
 
-    $('btn-cal').addEventListener('click', openCalModal);
+    $('btn-sweep').addEventListener('click', () =>
+        guard(() => transport.sweep(sweepParams())));
+    $('btn-sweep-export').addEventListener('click', exportTouchstone);
+    $('sweep-marker').addEventListener('change', (e) => {
+        state.sweepMarker = parseInt(e.target.value, 10) || 0;
+        redrawSweep();
+    });
+
+    $('cal-ports').addEventListener('change', () => {
+        renderCalChecklist();
+        renderCalibration();
+    });
+    $('btn-cal').addEventListener('click', () => { renderCalChecklist(); openCalModal(); });
     $('cal-close').addEventListener('click', closeCalModal);
     $('cal-ack').addEventListener('change', (e) => {
         $('cal-go').disabled = !e.target.checked;
