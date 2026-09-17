@@ -932,6 +932,10 @@ function scanParams() {
  */
 function sweepParams() {
     return {
+        // One sweep per parameter, so asking for four when you want one costs
+        // four times the wait. An S11-only measurement on a single antenna is
+        // the common case and there is no port 2 to measure anyway.
+        parameters: $('sweep-params').value.split(','),
         start_hz: parseFloat($('f-start').value) * 1e9,
         stop_hz: parseFloat($('f-stop').value) * 1e9,
         points: parseInt($('f-points').value, 10),

@@ -524,6 +524,9 @@ def check_sweep_no_positioner(r, outdir):
     assert len(sw["traces"]) == 4, (
         f"a VNA-only rig could not complete a capture: {sw['types']}")
     assert sw["state"]["has_positioner"] is False, sw["state"]
+    assert sw["pos_opened"] is False, (
+        "the service opened the positioner anyway - --no-positioner reached "
+        "argparse and went no further")
     assert sw["state"]["connected"] is True, (
         "a rig with no tower reported itself disconnected - the VNA was "
         f"answering: {sw['state']}")
@@ -713,9 +716,17 @@ def _run_sweep(argv: list[str]) -> int:
     loop = asyncio.new_event_loop()
     frames: list = []
     try:
-        backend = cs.HardwareBackend("TCPIP0::127.0.0.1::5025::SOCKET",
-                                     "ASRL16::INSTR", 1, "A",
-                                     with_positioner=not no_pos)
+        # Through build_backend rather than constructing directly, so the CLI
+        # wiring is covered too. It was not, once: --no-positioner reached
+        # argparse and stopped there, build_backend opened the tower anyway,
+        # and a scenario that built the backend by hand passed throughout.
+        import argparse
+        ns = argparse.Namespace(
+            sim=False, vna="TCPIP0::127.0.0.1::5025::SOCKET",
+            pos="ASRL16::INSTR", slot=1, device="A",
+            no_fallback=True, no_positioner=no_pos)
+        backend = cs.build_backend(ns)
+        assert backend.mode == "hw", "fell back to the simulator"
         svc = cs.ChamberService(backend, loop)
         svc.push = frames.append
 
@@ -764,7 +775,7 @@ def _run_sweep(argv: list[str]) -> int:
             "refused": refused,
             "state": {k: (float(v) if hasattr(v, "dtype") else v)
                       for k, v in svc.get_state().items()},
-            "pos_reads": 0,
+            "pos_opened": backend.pos is not None,
         })
     finally:
         loop.close()

@@ -322,7 +322,15 @@
                 <h3>Sweep</h3>
                 <div class="pane-tools">
                   <button class="btn btn-primary btn-small" id="btn-sweep"
-                          title="Capture S11, S21, S12 and S22 at the sweep settings. The tower is not moved.">Sweep</button>
+                          title="Capture at the sweep settings. The tower is not moved.">Sweep</button>
+                  <label class="inline-field"><span>Capture</span>
+                    <select class="modern-select" id="sweep-params">
+                      <option value="S11,S21,S12,S22">all four</option>
+                      <option value="S11">S11 only</option>
+                      <option value="S11,S21">S11 + S21</option>
+                      <option value="S22">S22 only</option>
+                    </select>
+                  </label>
                   <label class="inline-field"><span>Marker</span>
                     <select class="modern-select" id="sweep-marker"></select>
                   </label>

@@ -1052,8 +1052,10 @@ def build_backend(a) -> Any:
         print("backend: SIMULATED (forced with --sim)")
         return SimBackend()
     try:
-        b = HardwareBackend(a.vna, a.pos, a.slot, a.device)
-        print(f"backend: hardware\n  VNA {b.vna_idn()}\n  POS {b.pos_idn()}")
+        b = HardwareBackend(a.vna, a.pos, a.slot, a.device,
+                            with_positioner=not a.no_positioner)
+        pos = b.pos_idn() if b.has_positioner else "none (--no-positioner)"
+        print(f"backend: hardware\n  VNA {b.vna_idn()}\n  POS {pos}")
         return b
     except pm.InstrumentUnavailable as e:
         # These carry an instruction, not just a status code. Print the
