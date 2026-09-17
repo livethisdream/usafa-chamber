@@ -5,8 +5,15 @@
 # Checks each piece in the order it is needed and stops with the reason when
 # one is missing, rather than letting the service fail with a Windows-shaped
 # hint. Ctrl+C stops the service and frontend together; S2VNA is left running,
-# so its calibration and state survive a restart of the service. When start.sh
-# launches S2VNA itself, it passes --socket-server on.
+# so its calibration and state survive a restart of the service.
+#
+# S2VNA on Linux is CMT's AppImage: the Windows S2VNA under a bundled Wine, which
+# reaches USB through CMT's UTPServer helper. The stock Windows installer run
+# under Wine cannot, and the native cmtvna tarball offers only a demo RP5. As of
+# 25.1.2 the AppImage still does not open the A2202-Fx (36bf:1413) and falls back
+# to a demo C1209, so until CMT ships a newer one, run S2VNA on a Windows PC and
+# point VNA= at it. The socket server has no command-line switch; turn it on once
+# in the GUI and it is remembered in ~/.vna-portable.
 #
 # Usage:
 #   ./start.sh                 # real rig
@@ -15,7 +22,7 @@
 #
 # Overrides (environment):
 #   VNA=TCPIP0::127.0.0.1::5025::SOCKET   POS=ASRL/dev/emcenter::INSTR
-#   S2VNA=/path/to/cmtvna
+#   S2VNA=/path/to/CMT_S2VNA_*.appimage
 
 set -euo pipefail
 
@@ -114,29 +121,44 @@ else
     if [[ "$VNA" =~ ::([0-9]+)::SOCKET$ ]]; then vna_port="${BASH_REMATCH[1]}"; fi
 
     if ! listening "$vna_port"; then
-        if pgrep -x cmtvna >/dev/null; then
+        if pgrep -f 'S2VNA\.exe' >/dev/null; then
             warn "S2VNA is running but nothing is listening on $vna_port"
             info 'Turn its socket server on: System -> Misc Setup -> Network Setup -> Socket Server -> On'
-            info '(or close S2VNA and rerun; start.sh launches it with the server on)'
         else
             s2vna="${S2VNA:-}"
             if [ -z "$s2vna" ]; then
-                for candidate in "$HOME"/Downloads/cmtvna*/bin/cmtvna "$HOME"/cmtvna*/bin/cmtvna /opt/cmtvna*/bin/cmtvna; do
-                    if [ -x "$candidate" ]; then s2vna="$candidate"; break; fi
+                for candidate in "$HOME"/src/CMT_S2VNA_*.appimage "$HOME"/Downloads/CMT_S2VNA_*.appimage \
+                                 "$HOME"/CMT_S2VNA_*.appimage /opt/CMT_S2VNA_*.appimage; do
+                    if [ -x "$candidate" ]; then s2vna="$candidate"; fi   # last match is the newest
                 done
             fi
             if [ -z "$s2vna" ]; then
                 bad 'S2VNA is not running and was not found'
-                info 'Start it by hand, or point at it: S2VNA=/path/to/cmtvna ./start.sh'
+                info 'Start it by hand, or point at it: S2VNA=/path/to/CMT_S2VNA_*.appimage ./start.sh'
                 exit 1
             fi
-            info "launching $s2vna with its socket server on"
+            info "launching $s2vna"
+            if ! ldconfig -p | grep -q 'libfuse\.so\.2'; then
+                # Ubuntu 24.04 ships only FUSE 3; AppImages mount with FUSE 2.
+                # Unpacking to /tmp each launch works without it, just slower.
+                warn 'libfuse2 missing - unpacking the AppImage instead of mounting it'
+                info 'For faster starts: sudo apt install libfuse2t64'
+                export APPIMAGE_EXTRACT_AND_RUN=1
+            fi
             # Detached, so it outlives this script and Ctrl+C.
-            (cd "$(dirname "$s2vna")" && setsid ./cmtvna --socket-server on --socket-port "$vna_port" \
-                >"$LOG_DIR/s2vna.log" 2>&1 </dev/null &)
+            (setsid "$s2vna" >"$LOG_DIR/s2vna.log" 2>&1 </dev/null &)
         fi
         info "waiting for port $vna_port"
-        until listening "$vna_port"; do sleep 1; done
+        waited=0
+        until listening "$vna_port"; do
+            sleep 1
+            waited=$((waited + 1))
+            if [ "$waited" -eq 45 ]; then
+                warn "still nothing on $vna_port after 45 s"
+                info 'If S2VNA is up, turn its socket server on: System -> Misc Setup -> Network Setup -> Socket Server -> On'
+                info "S2VNA's output: $LOG_DIR/s2vna.log"
+            fi
+        done
     fi
     ok "listening on $vna_port"
 
