@@ -13,6 +13,11 @@
     The positioner COM port is discovered from the EMCenter USB identity, so
     this keeps working when Windows renumbers the port. Override with -Pos.
 
+    With no EMCenter attached it comes up VNA-only instead of refusing: sweeps,
+    the Smith chart and a 1-port calibration need no tower. It says so loudly,
+    and the dashboard disables Start scan, so one icon covers both rigs without
+    a pattern run being startable against a tower that is not there.
+
 .PARAMETER Sim
     Run the simulator. No instruments are touched and no rig checks are made.
 
@@ -26,9 +31,10 @@
     VISA resource for the positioner, e.g. ASRL4::INSTR. Default: auto-detect.
 
 .PARAMETER VnaOnly
-    Bring up the VNA alone. The positioner is neither looked for nor opened,
-    so a sweep works on a bench with no EMCenter attached; scans and jogs are
-    refused by the service rather than failing later.
+    Force the VNA-only rig even when a positioner is present. Not needed just
+    because the EMCenter is absent - that is detected, and the script comes up
+    VNA-only on its own, saying so. This is for deliberately ignoring a tower
+    that is plugged in.
 
 .PARAMETER NoPause
     Do not wait for a keypress when something fails. For scripts; the desktop
@@ -180,36 +186,52 @@ try {
         # ------------------------------------------------------------------
         Write-Head 'Positioner (EMCenter)'
 
+        # One entry point for both rigs. A missing tower is a reason to come up
+        # without one, not a reason to refuse: the sweep, the Smith chart and a
+        # 1-port calibration all work on a bench with only the VNA, and that is
+        # a whole way of using this that should not need a different icon.
+        #
+        # Safe to infer because the service refuses rather than pretends. With
+        # no positioner, Start scan is disabled and says why, so a pattern run
+        # cannot quietly become 72 sweeps of the same angle - which is the only
+        # thing that made inferring it dangerous.
+        $vnaOnlyBecause = ''
         if ($VnaOnly) {
-            Write-Warn 'skipped (-VnaOnly) - sweeps only, nothing turns the tower'
-            Write-Info 'The service refuses scans and jogs rather than failing later.'
-            $serviceArgs += @('--no-fallback', '--no-positioner', '--vna', $Vna)
+            $vnaOnlyBecause = 'asked for with -VnaOnly'
+        } elseif ($Pos) {
+            Write-Ok "using $Pos"
         } else {
-            if (-not $Pos) {
-                # Windows renumbers COM ports per machine and per USB socket, so
-                # the number is not worth hardcoding. The USB identity is stable.
-                $emc = Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue |
-                       Where-Object { $_.Name -match 'EMCenter.*\(COM\d+\)' } |
-                       Select-Object -First 1
-                if (-not $emc) {
-                    $chassis = Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue |
-                               Where-Object { $_.Name -match 'EMCenter' }
-                    if ($chassis) {
-                        Write-Info 'The chassis is on USB but has no COM port: the driver is missing.'
-                        Write-Info 'Install the ETS-Lindgren EMCenter USB drivers (see SETUP_NEW_PC.md).'
-                    } else {
-                        Write-Info 'The chassis is not on USB. Check it is powered and the cable is in.'
-                    }
-                    Write-Info 'A VNA-only session does not need it: .\start.ps1 -VnaOnly'
-                    Invoke-Fail 'no EMCenter COM port found'
-                }
+            # Windows renumbers COM ports per machine and per USB socket, so
+            # the number is not worth hardcoding. The USB identity is stable.
+            $emc = Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Name -match 'EMCenter.*\(COM\d+\)' } |
+                   Select-Object -First 1
+            if ($emc) {
                 $null = $emc.Name -match '\(COM(\d+)\)'
                 $Pos = "ASRL$($Matches[1])::INSTR"
                 Write-Ok "$($emc.Name) -> $Pos"
             } else {
-                Write-Ok "using $Pos"
+                $chassis = Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue |
+                           Where-Object { $_.Name -match 'EMCenter' }
+                $vnaOnlyBecause = if ($chassis) {
+                    'the chassis is on USB but has no COM port - the ETS-Lindgren driver is missing'
+                } else {
+                    'no EMCenter found on USB'
+                }
             }
+        }
 
+        if ($vnaOnlyBecause) {
+            Write-Warn "starting VNA-only: $vnaOnlyBecause"
+            Write-Info 'Sweeps, the Smith chart and calibration all work.'
+            Write-Info 'Start scan is disabled in the dashboard and says why.'
+            if (-not $VnaOnly) {
+                Write-Info 'If you meant to scan a pattern: check the EMCenter is'
+                Write-Info 'powered and cabled, then setup.ps1 -CheckOnly tells the'
+                Write-Info 'difference between unplugged and a failed driver install.'
+            }
+            $serviceArgs += @('--no-fallback', '--no-positioner', '--vna', $Vna)
+        } else {
             $serviceArgs += @('--no-fallback', '--vna', $Vna, '--pos', $Pos)
         }
     }
