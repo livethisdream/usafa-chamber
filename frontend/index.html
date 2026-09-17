@@ -438,6 +438,16 @@
 
           <hr class="divider" />
           <div class="control-group">
+            <label for="cal-ports">Calibration</label>
+            <select class="modern-select" id="cal-ports">
+              <option value="1,2">2-port (S11 S21 S12 S22)</option>
+              <option value="1">1-port, port 1 (reflection only)</option>
+              <option value="2">1-port, port 2 (reflection only)</option>
+            </select>
+          </div>
+          <p class="cal-note">A 1-port corrects reflection on that port alone and needs only that side of the module mated &mdash; the right choice for measuring S11 on a single antenna. A 2-port also corrects transmission, and is what a pattern measurement needs.</p>
+
+          <div class="control-group">
             <label for="cal-plane">Reference plane</label>
             <select class="modern-select" id="cal-plane">
               <option>cable ends inside the chamber</option>
@@ -449,8 +459,8 @@
           <hr class="divider" />
           <ol class="cal-checklist">
             <li>Stop the tower and confirm nothing is scanning.</li>
-            <li>Unmate the transmit horn and the AUT from the cable ends.</li>
-            <li>Mate the ACM2202 across those two ends.</li>
+            <li id="cal-step-unmate">Unmate the transmit horn and the AUT from the cable ends.</li>
+            <li id="cal-step-mate">Mate the ACM2202 across those two ends.</li>
             <li>Leave the chamber and close the door.</li>
           </ol>
           <label class="cal-confirm"><input type="checkbox" id="cal-ack" /> The module is connected and the chamber is clear.</label>

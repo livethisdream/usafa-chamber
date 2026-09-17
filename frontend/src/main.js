@@ -494,8 +494,23 @@ function calParams() {
         if_bw_hz: parseFloat($('f-ifbw').value),
         power_dbm: parseFloat($('f-power').value),
         parameter: $('f-param').value,
+        ports: $('cal-ports').value.split(',').map(Number),
         reference_plane: $('cal-plane').value,
     };
+}
+
+/** The checklist depends on how many ports are being calibrated: a 1-port needs
+ *  one cable end on the module, not both, and saying "mate it across the two
+ *  ends" for a 1-port sends somebody to disconnect an antenna for no reason. */
+function renderCalChecklist() {
+    const one = $('cal-ports').value.split(',').length === 1;
+    const port = $('cal-ports').value.split(',')[0];
+    $('cal-step-unmate').textContent = one
+        ? `Unmate whatever is on the port ${port} cable end.`
+        : 'Unmate the transmit horn and the AUT from the cable ends.';
+    $('cal-step-mate').textContent = one
+        ? `Mate one port of the ACM2202 to that end.`
+        : 'Mate the ACM2202 across those two ends.';
 }
 
 /** Which sweep settings a prospective run does not share with the cal. Mirrors
@@ -1200,7 +1215,11 @@ function wire() {
         redrawSweep();
     });
 
-    $('btn-cal').addEventListener('click', openCalModal);
+    $('cal-ports').addEventListener('change', () => {
+        renderCalChecklist();
+        renderCalibration();
+    });
+    $('btn-cal').addEventListener('click', () => { renderCalChecklist(); openCalModal(); });
     $('cal-close').addEventListener('click', closeCalModal);
     $('cal-ack').addEventListener('change', (e) => {
         $('cal-go').disabled = !e.target.checked;

@@ -95,7 +95,9 @@ class CalRequest:
     if_bw_hz: float = 1.0e3
     power_dbm: float = 0.0
     parameter: str = "S21"
-    ports: tuple[int, int] = (1, 2)
+    # One port or two. A reflection measurement on a single antenna wants the
+    # 1-port: nothing is connected to the other side to calibrate against.
+    ports: tuple[int, ...] = (1, 2)
     orient: bool = False
     reference_plane: str = ""
 
@@ -103,7 +105,12 @@ class CalRequest:
     def from_args(cls, a: dict) -> "CalRequest":
         f = {k: a[k] for k in cls.__dataclass_fields__ if k in a}
         if "ports" in f:
-            f["ports"] = tuple(int(p) for p in f["ports"])[:2]
+            ports = tuple(dict.fromkeys(int(p) for p in f["ports"]))[:2]
+            if not ports:
+                raise BackendError("a calibration needs at least one port")
+            if any(p not in (1, 2) for p in ports):
+                raise BackendError(f"ports are 1 and 2, not {list(ports)}")
+            f["ports"] = ports
         return cls(**f)
 
     def sweep(self) -> dict:
@@ -765,8 +772,10 @@ class ChamberService:
                    "ports": list(req.ports),
                    "reference_plane": req.reference_plane,
                    "mode": self.backend.mode})
-        self.log("info", "cal", f"AutoCal on ports {req.ports[0]} and "
-                                f"{req.ports[1]}, {req.points} pts, "
+        where = (f"port {req.ports[0]}" if len(req.ports) == 1
+                 else f"ports {req.ports[0]} and {req.ports[1]}")
+        self.log("info", "cal", f"{len(req.ports)}-port AutoCal on {where}, "
+                                f"{req.points} pts, "
                                 f"{req.start_hz/1e9:.3f}-{req.stop_hz/1e9:.3f} GHz")
 
         def step(msg: str) -> None:
@@ -787,7 +796,7 @@ class ChamberService:
 
             record = {"taken_at": started,
                       "finished": time.strftime("%Y-%m-%d %H:%M:%S"),
-                      "method": "ecal_solt2",
+                      "method": f"ecal_solt{len(req.ports)}",
                       "ports": list(req.ports),
                       "reference_plane": req.reference_plane,
                       "module": module,

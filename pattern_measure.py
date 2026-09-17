@@ -428,10 +428,17 @@ class Vna:
         except pyvisa.VisaIOError:
             pass
 
-    def acm_calibrate(self, ports: tuple[int, int] | None = None,
+    def acm_calibrate(self, ports=None,
                       orient: bool = False,
                       on_step: "Callable[[str], None] | None" = None) -> str:
-        """Run a 2-port AutoCal and return the resulting correction state.
+        """Run an AutoCal and return the resulting correction state.
+
+        One port in `ports` runs SOLT1, two runs SOLT2. A reflection-only
+        measurement - an antenna on one port and nothing on the other - wants
+        the 1-port: it corrects the port being measured, needs only one side of
+        the module mated, and does not fail because the other port has nothing
+        on it to orient against. A 2-port cal corrects reflection too, so this
+        is about what the bench can actually present, not about accuracy.
 
         Blocks for the whole procedure. There is no progress to poll and no
         point to cancel at: the module runs short/open/load/thru inside one SCPI
@@ -445,7 +452,9 @@ class Vna:
         turning tower.
         """
         a = self.acm
-        p1, p2 = ports or (a.port1, a.port2)
+        p = tuple(ports) if ports else (a.port1, a.port2)
+        if len(p) not in (1, 2):
+            raise ValueError(f"an AutoCal is over one or two ports, not {len(p)}")
         saved, self.io.timeout = self.io.timeout, a.timeout_ms
         try:
             if orient:
@@ -453,9 +462,14 @@ class Vna:
                     on_step("orienting the module to the ports")
                 self.io.write(a.orient.format(ch=self.ch))
                 self.io.query("*OPC?")
-            if on_step:
-                on_step(f"2-port AutoCal on ports {p1} and {p2}")
-            self.io.write(a.solt2.format(ch=self.ch, p1=p1, p2=p2))
+            if len(p) == 1:
+                if on_step:
+                    on_step(f"1-port AutoCal on port {p[0]}")
+                self.io.write(a.solt1.format(ch=self.ch, p1=p[0]))
+            else:
+                if on_step:
+                    on_step(f"2-port AutoCal on ports {p[0]} and {p[1]}")
+                self.io.write(a.solt2.format(ch=self.ch, p1=p[0], p2=p[1]))
             self.io.query("*OPC?")
         except BaseException:
             self.acm_clear()

@@ -390,6 +390,29 @@ def check_cal_nominal(r, outdir):
     return f"cal applied and recorded at {rec['sweep']['points']} pts"
 
 
+def s_cal_one_port():
+    # Reflection only: an antenna on port 1 and nothing on port 2. A 2-port
+    # would have no second side to calibrate against, so the cal has to be able
+    # to be one port - and has to issue SOLT1, not SOLT2 with a port dropped.
+    return {"_target": "cal"}, ["--ports", "1"]
+
+
+def check_cal_one_port(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    done = r["cal"].get("done") or {}
+    assert done.get("ok") is True, f"a 1-port cal failed: {done}"
+    issued = " ".join(r["cals"])
+    assert "SOLT1" in issued, f"no SOLT1 was issued: {r['cals']}"
+    assert "SOLT2" not in issued, (
+        f"a 1-port calibration issued SOLT2: {r['cals']}")
+    rec = done.get("record") or {}
+    assert rec.get("method") == "ecal_solt1", (
+        f"recorded as {rec.get('method')!r} - the record has to say which cal "
+        f"it was, or a 1-port gets trusted for transmission later")
+    assert rec.get("ports") == [1], rec.get("ports")
+    return f"issued {r['cals'][-1]!r} and recorded it as 1-port"
+
+
 def s_cal_no_module():
     # The likeliest real outcome of Wednesday: the software cannot see the
     # module over SCPI. It has to fail as a clear message, not a traceback.
@@ -619,6 +642,7 @@ SCENARIOS = [
     ("correction_mute", s_correction_mute, check_correction_mute),
     ("meta_correction", s_meta_records_correction, check_meta_records_correction),
     ("cal_nominal", s_cal_nominal, check_cal_nominal),
+    ("cal_one_port", s_cal_one_port, check_cal_one_port),
     ("cal_no_module", s_cal_no_module, check_cal_no_module),
     ("cal_unsupported", s_cal_unsupported, check_cal_unsupported),
     ("cal_fails", s_cal_fails_midway, check_cal_fails_midway),
@@ -845,7 +869,9 @@ def _run_cal(argv: list[str]) -> int:
             finally:
                 stop2.set()
         else:
-            svc._run_cal(cs.CalRequest(reference_plane="rigcheck"))
+            ports = ((int(argv[argv.index("--ports") + 1]),)
+                     if "--ports" in argv else (1, 2))
+            svc._run_cal(cs.CalRequest(reference_plane="rigcheck", ports=ports))
 
         done = [f for f in frames if f.get("type") == "cal_done"]
         _CAL_RESULT.update({
