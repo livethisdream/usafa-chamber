@@ -186,6 +186,13 @@ h1, h2, h3 { font-family: 'Outfit', 'Inter', sans-serif; }
 }
 .modern-input:focus, .modern-select:focus { border-color: var(--primary); }
 .modern-input:disabled, .modern-select:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Run type, in the header beside the button it re-aims: sized to its content
+   rather than filling a sidebar column. */
+.modern-select.compact {
+  width: auto;
+  padding: 0.28rem 0.45rem;
+  font-size: 0.72rem;
+}
 
 /* chamber-specific: file picker inside an accordion body */
 .file-input { width: 100%; font-size: 0.72rem; color: var(--text-muted); }

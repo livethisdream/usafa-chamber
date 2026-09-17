@@ -53,6 +53,17 @@ def open_section(page, title: str) -> None:
         page.wait_for_timeout(450)
 
 
+def fmt_disabled(page, value: str) -> bool:
+    """Whether a trace-format option is greyed out.
+
+    Reads the DOM property rather than asking Playwright, because `<option>`
+    is exactly the element where "disabled" is ambiguous between the option and
+    the select that holds it, and this test cares about the option.
+    """
+    return page.eval_on_selector(f"#trace-format option[value='{value}']",
+                                 "o => o.disabled")
+
+
 def synthetic_pattern() -> str:
     """A stand-in for a solver export: the same array factor the simulator
     uses, but for a slightly smaller array.
@@ -207,6 +218,127 @@ def main(argv=None) -> int:
                 check("round-trips its own run", ok, f"delta {delta}")
             else:
                 check("round-trips its own run", False, f"{own} not written")
+
+            # Trace formats. All four are transforms of the vector the scan
+            # already delivered, so the test is that switching format never
+            # goes back to the instrument - and that the two the data cannot
+            # support are refused rather than drawn. The run above was S21, so
+            # VSWR and Smith must both be unavailable on it.
+            page.click(".tab-btn:has-text('VNA')")
+            page.wait_for_timeout(400)
+            check("phase is available on a scan",
+                  not fmt_disabled(page, "phase"),
+                  "complex data arrived with scan_point")
+            check("VSWR refused for S21",
+                  fmt_disabled(page, "vswr") and fmt_disabled(page, "smith"),
+                  page.locator("#trace-format option[value='vswr']").inner_text())
+
+            page.select_option("#trace-format", "phase")
+            page.wait_for_timeout(400)
+            check("phase renders", page.is_visible("#chart-rect")
+                  and not page.is_visible("#chart-smith"),
+                  page.inner_text("#trace-label"))
+
+            # A single sweep: the tower must not move, and the reflection
+            # parameter must unlock the two formats S21 could not support.
+            open_section(page, "VNA")
+            page.select_option("#f-param", "S11")
+            page.select_option("#run-type", "single")
+            page.wait_for_timeout(200)
+            check("run type relabels the button",
+                  page.inner_text("#btn-scan").strip() == "Sweep once"
+                  and not page.is_enabled("#a-step"),
+                  "angle grid disabled for a single sweep")
+
+            angle_before = page.inner_text("#stat-angle")
+            page.click("#btn-scan")
+            for _ in range(60):
+                if "S11" in page.inner_text("#trace-label"):
+                    break
+                page.wait_for_timeout(200)
+            check("single sweep measures",
+                  "S11" in page.inner_text("#trace-label"),
+                  page.inner_text("#trace-label"))
+            check("single sweep leaves the axis alone",
+                  page.inner_text("#stat-angle") == angle_before,
+                  f"still at {angle_before}")
+
+            check("reflection unlocks VSWR and Smith",
+                  not fmt_disabled(page, "vswr") and not fmt_disabled(page, "smith"))
+
+            # The sweep ran at 51 points while the pattern above was measured at
+            # 51 too, so force them apart: a sweep at a different span must not
+            # re-label the pattern's cut picker or shift what the imported
+            # reference is compared against. The trace carries its own axis.
+            page.fill("#f-points", "21")
+            page.click("#btn-scan")
+            page.wait_for_timeout(1500)
+            axes = page.evaluate(
+                "() => ({ trace: window.__chamber.state.traceFreqs.length,"
+                " pattern: window.__chamber.state.freqs.length,"
+                " cuts: document.getElementById('cut-freq').options.length })")
+            check("a sweep leaves the pattern's axis alone",
+                  axes["trace"] == 21 and axes["pattern"] == 51
+                  and axes["cuts"] == 51,
+                  f"trace {axes['trace']}, pattern {axes['pattern']}, "
+                  f"{axes['cuts']} cuts")
+            page.fill("#f-points", "51")
+
+            page.select_option("#trace-format", "vswr")
+            page.wait_for_timeout(400)
+            page.screenshot(path=str(a.shots / "format-vswr.png"))
+
+            # The Smith chart is the one format that swaps the plot div, so
+            # assert the swap both ways rather than only that it appeared.
+            page.select_option("#trace-format", "smith")
+            page.wait_for_timeout(600)
+            check("smith chart renders",
+                  page.is_visible("#chart-smith") and not page.is_visible("#chart-rect"),
+                  f"{page.locator('#chart-smith .trace').count()} trace(s)")
+
+            # The trace is drawn on the impedance plane, so what reaches Plotly
+            # must be z, not Gamma. Feeding it Gamma renders something that
+            # looks like a Smith chart right up until you notice the match is
+            # missing: every point with a negative real part lands outside
+            # r = 0 and is clipped, and near resonance Gamma's real part is
+            # exactly what goes negative. A passive load has r >= 0, so the
+            # locus staying inside the chart is the assertion that catches it.
+            locus = page.evaluate(
+                "() => { const t = document.getElementById('chart-smith').data[0];"
+                " return { n: t.real.length, minReal: Math.min(...t.real),"
+                " want: window.__chamber.state.traceFreqs.length,"
+                " finite: t.real.every(Number.isFinite)"
+                " && t.imag.every(Number.isFinite) }; }")
+            check("smith locus stays inside the chart",
+                  locus["n"] == locus["want"] and locus["n"] > 0
+                  and locus["minReal"] >= 0 and locus["finite"],
+                  f"{locus['n']}/{locus['want']} points, "
+                  f"min r = {locus['minReal']:.3f}")
+            page.screenshot(path=str(a.shots / "format-smith.png"))
+
+            # Retuning the sidebar must NOT disturb the plot: what is on screen
+            # is still the S11 that was measured, and it stays captioned that
+            # way. The fallback is owed to new data, not to a form field.
+            page.select_option("#f-param", "S21")
+            page.wait_for_timeout(400)
+            check("sidebar retune leaves measured data alone",
+                  page.input_value("#trace-format") == "smith"
+                  and "S11" in page.inner_text("#trace-label"),
+                  page.inner_text("#trace-label"))
+
+            # ...but the S21 sweep that follows cannot be shown on a Smith
+            # chart, so the format has to give way when that data lands.
+            page.click("#btn-scan")
+            for _ in range(60):
+                if "S21" in page.inner_text("#trace-label"):
+                    break
+                page.wait_for_timeout(200)
+            check("smith gives way to data it cannot show",
+                  page.input_value("#trace-format") == "mag"
+                  and page.is_visible("#chart-rect")
+                  and not page.is_visible("#chart-smith"),
+                  f"format now {page.input_value('#trace-format')}")
+            page.select_option("#run-type", "pattern")
 
             # Calibration. The sim corrects nothing and says so - what is
             # under test is the wizard: the modal opens, the acknowledgement

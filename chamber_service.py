@@ -10,6 +10,11 @@ learn about as it happens.
     server -> {"id": "req_7", "ok": true, "data": {...}}
     server -> {"type": "scan_point", "index": 3, ...}          (unsolicited)
 
+Two ways to acquire, and only one of them turns the tower: `start_scan` walks
+the angle grid and writes a run, `sweep_once` measures where the axis already
+stands. Both carry the complex vector, not just magnitude, so VSWR, phase and a
+Smith locus are transforms the display does rather than measurements it repeats.
+
 Two backends implement one interface:
   * HardwareBackend — drives the real A2202-Fx and EMControl 7006-001 through
     the instrument wrappers in pattern_measure.py, so every hardware fix made
@@ -141,6 +146,24 @@ def cal_mismatch(record: dict | None, req) -> list[str]:
     return out
 
 
+def _trace_payload(s: np.ndarray, mag_db: np.ndarray) -> dict:
+    """The wire form of one measured sweep: magnitude, and the vector itself.
+
+    Magnitude is sent already in dB because every consumer wants it that way and
+    nobody should have to agree with us about the epsilon that keeps log10 of a
+    null finite. The complex parts ride along because a Smith locus, VSWR, phase
+    and group delay are all transforms of them - sending only magnitude is what
+    forced a second measurement to see the same sweep a different way.
+
+    Six decimals on a quantity bounded near 1 is roughly a part in 10^6, far
+    below the 0.019 dB peak-to-peak floor the thru run measured, so nothing that
+    survives the instrument is lost here.
+    """
+    return {"mag_db": [round(float(v), 4) for v in mag_db],
+            "re": [round(float(v), 6) for v in s.real],
+            "im": [round(float(v), 6) for v in s.imag]}
+
+
 # --------------------------------------------------------------------------
 # Backends
 # --------------------------------------------------------------------------
@@ -164,6 +187,7 @@ class SimBackend:
         self._angle = 0.0
         self._speed = 100.0
         self._slew = slew_deg_s
+        self._param = "S21"
 
     # -- identity / state ---------------------------------------------------
     def vna_idn(self) -> str:
@@ -236,6 +260,7 @@ class SimBackend:
     # -- measurement --------------------------------------------------------
     def configure(self, req: ScanRequest) -> None:
         self._freqs = np.linspace(req.start_hz, req.stop_hz, req.points)
+        self._param = req.parameter
 
     def frequencies(self) -> np.ndarray:
         return self._freqs
@@ -246,6 +271,37 @@ class SimBackend:
     NULL_FLOOR_DB = -45.0
 
     def measure(self) -> np.ndarray:
+        """One synthesized sweep of whichever parameter is configured.
+
+        Reflection and transmission are different measurements and the sim says
+        so. Handing back the pattern envelope for S11 would put |Gamma| within a
+        dB of unity, pinning the Smith locus to the rim where nothing is legible
+        and quietly teaching the operator that a well-matched antenna looks like
+        a short - so a reflection parameter gets a resonance instead.
+        """
+        time.sleep(0.06)                                  # stand in for a sweep
+        return (self._reflection() if self._param.upper() in ("S11", "S22")
+                else self._transmission())
+
+    def _reflection(self) -> np.ndarray:
+        """A series-RLC antenna match: resonant at band center, Q of about 12.
+
+        z = r + jQ(f/f0 - f0/f) normalized to Z0, so Gamma = (z-1)/(z+1) walks
+        the constant-resistance circle at r = 0.75, crossing the real axis at
+        resonance: -17 dB return loss, VSWR 1.33. Barely angle-dependent,
+        because a reflection measured at the AUT port is: the tower turning
+        does not retune the antenna, and a sim that pretended otherwise would
+        make the pattern tab look meaningful for a parameter it is not.
+        """
+        f = self._freqs
+        f0 = 0.5 * (f[0] + f[-1])
+        z = 0.75 + 1j * 12.0 * (f / f0 - f0 / f)
+        gamma = (z - 1.0) / (z + 1.0)
+        rng = np.random.default_rng(int(self._angle * 10) & 0xFFFF)
+        return gamma + (rng.normal(0.0, 5e-4, f.size)
+                        + 1j * rng.normal(0.0, 5e-4, f.size))
+
+    def _transmission(self) -> np.ndarray:
         """A main lobe at 0 deg with decaying sidelobes, floored and dithered.
 
         Noise is added in dB and kept well below the null floor: adding it as a
@@ -266,7 +322,6 @@ class SimBackend:
         mag_db = env_db + tilt_db + rng.normal(0.0, 0.05, n)
         mag = 10.0 ** (mag_db / 20.0)
         phase = np.radians((self._angle * 3.0 + np.linspace(0, 180, n)) % 360.0)
-        time.sleep(0.06)                                  # stand in for a sweep
         return mag * np.exp(1j * phase)
 
     def close(self) -> None:
@@ -522,8 +577,9 @@ class ChamberService:
         if not (d / "meta.json").is_file():
             raise BackendError(f"no such run: {a['name']}")
         meta = json.loads((d / "meta.json").read_text())
-        angles, freqs, mag = _read_run_csv(d / "pattern.csv")
-        return {"meta": meta, "angles": angles, "freqs": freqs, "mag_db": mag}
+        angles, freqs, mag, re, im = _read_run_csv(d / "pattern.csv")
+        return {"meta": meta, "angles": angles, "freqs": freqs, "mag_db": mag,
+                "re": re, "im": im}
 
     # -- calibration --------------------------------------------------------
     def cmd_acm_probe(self, _a: dict) -> dict:
@@ -617,6 +673,81 @@ class ChamberService:
             self.push({"type": "cal_done", "ok": False, "cancelled": False,
                        "error": str(e)})
 
+    def _report_correction(self, req, correction: str, what: str) -> list[str]:
+        """Say out loud what this acquisition is and is not corrected for.
+
+        Called after configure(), because configuring the sweep is what can
+        invalidate a calibration. Said up front rather than at the end: a
+        72-point run is minutes long, and an uncalibrated one is minutes wasted
+        if nobody noticed until the file was written.
+
+        A single sweep gets exactly the same treatment as a scan. It is shorter,
+        but it is also the one a Smith chart or a VSWR reading is taken from,
+        and those are worth less than nothing uncalibrated - a pattern is
+        normalized to its own peak and survives, an impedance locus does not.
+        """
+        corr_on = pm.correction_is_on(correction)
+        if corr_on is False:
+            self.log("warn", "vna", f"error correction is OFF ({correction}) "
+                                    f"- this {what} will be uncalibrated")
+        elif corr_on is None and self.backend.mode != "sim":
+            self.log("warn", "vna", f"error correction state unknown "
+                                    f"({correction})")
+
+        # A calibration is only meaningful at the sweep it was taken at. A VNA
+        # interpolating a cal across a span it never measured produces a
+        # plausible-looking answer of unknown quality, which is the same bug
+        # class as the split position reply - so say it out loud.
+        drift = cal_mismatch(self.calibration, req)
+        if drift:
+            self.log("warn", "vna",
+                     f"this {what} does not match the calibration: "
+                     + "; ".join(drift))
+        return drift
+
+    def cmd_sweep_once(self, a: dict) -> dict:
+        """One sweep, tower parked. Nothing here commands the axis.
+
+        The counterpart to a pattern scan: same instrument, same configure path,
+        no motion. That is the whole distinction the UI's run-type selector
+        makes, and it lives here rather than in a display mode because it is the
+        only part of "S-parameters vs. pattern" that changes what the rig does.
+        Everything else - magnitude, phase, VSWR, the Smith locus - is a
+        transform of the vector this returns, and none of it is worth a second
+        trip to the instrument.
+
+        Runs inline rather than on the scan worker: a single sweep is seconds at
+        worst, so there is no second worker state machine to cancel, poll or get
+        wedged. The trace leaves as a push frame and the reply is an
+        acknowledgement, the same split `start_scan` uses - every client sees
+        the same data by the same route, including a second browser watching the
+        same service, and a 1601-point sweep crosses the socket once.
+        """
+        self._require_idle()
+        req = ScanRequest.from_args(a)
+        with self._lock:
+            self.backend.configure(req)
+            freqs = self.backend.frequencies()
+            correction = self.backend.correction_state()
+            angle = self.backend.position()
+            s = self.backend.measure()
+
+        drift = self._report_correction(req, correction, "sweep")
+        mag = 20.0 * np.log10(np.maximum(np.abs(s), 1e-15))
+
+        self.push({"type": "sweep",
+                   "freqs": freqs.tolist(),
+                   "angle": round(float(angle), 2),
+                   "parameter": req.parameter,
+                   "correction": correction,
+                   "cal_mismatch": drift,
+                   "params": req.__dict__,
+                   **_trace_payload(s, mag)})
+        self.log("info", "sweep", f"{req.parameter} at {angle:.1f} deg, "
+                                  f"{freqs.size} points")
+        return {"swept": True, "points": int(freqs.size),
+                "angle": round(float(angle), 2), "parameter": req.parameter}
+
     def cmd_start_scan(self, a: dict) -> dict:
         self._require_idle()
         req = ScanRequest.from_args(a)
@@ -642,27 +773,7 @@ class ChamberService:
                 freqs = self.backend.frequencies()
                 correction = self.backend.correction_state()
 
-            # Read after configure, because configuring the sweep is what can
-            # invalidate a calibration. Said now rather than at the end: a
-            # 72-point run is minutes long, and an uncalibrated one is minutes
-            # wasted if nobody noticed until the file was written.
-            corr_on = pm.correction_is_on(correction)
-            if corr_on is False:
-                self.log("warn", "vna", f"error correction is OFF ({correction}) "
-                                        f"- this run will be uncalibrated")
-            elif corr_on is None and self.backend.mode != "sim":
-                self.log("warn", "vna", f"error correction state unknown "
-                                        f"({correction})")
-
-            # A calibration is only meaningful at the sweep it was taken at. A
-            # VNA interpolating a cal across a span it never measured produces a
-            # plausible-looking answer of unknown quality, which is the same bug
-            # class as the split position reply - so say it out loud.
-            drift = cal_mismatch(self.calibration, req)
-            if drift:
-                self.log("warn", "vna",
-                         "this run does not match the calibration: "
-                         + "; ".join(drift))
+            drift = self._report_correction(req, correction, "run")
 
             self.push({"type": "scan_started", "name": name,
                        "angles": angles.tolist(), "freqs": freqs.tolist(),
@@ -700,8 +811,8 @@ class ChamberService:
                     self.push({"type": "scan_point", "index": i,
                                "angle_cmd": float(ang),
                                "angle_actual": round(float(actual), 2),
-                               "mag_db": [round(float(v), 4) for v in mag],
-                               "peak_db": round(float(mag.max()), 3)})
+                               "peak_db": round(float(mag.max()), 3),
+                               **_trace_payload(s, mag)})
                     self.push({"type": "position", "deg": round(float(actual), 2)})
 
             meta = {"name": name, "params": req.__dict__,
@@ -745,6 +856,7 @@ class ChamberService:
     HANDLERS = {
         "get_state": "cmd_get_state",
         "start_scan": "cmd_start_scan",
+        "sweep_once": "cmd_sweep_once",
         "cancel_scan": "cmd_cancel_scan",
         "stop": "cmd_stop",
         "jog": "cmd_jog",
@@ -806,16 +918,38 @@ def _save_calibration(record: dict) -> None:
 
 
 def _read_run_csv(path: Path):
+    """Angles, frequencies, and the magnitude grid - plus the complex one.
+
+    The complex parts come back so a stored run opens on a Smith chart without
+    being re-measured, which is the whole point of having written them. They are
+    returned as None rather than faked when the file has no re/im columns: a
+    Smith locus reconstructed from magnitude alone would be a circle of our own
+    invention, and the UI would rather hide the format than draw that.
+    """
     rows = list(csv.DictReader(path.open()))
     ang = sorted({float(r["angle_cmd_deg"]) for r in rows})
     frq = sorted({float(r["freq_hz"]) for r in rows})
-    grid = np.zeros((len(ang), len(frq)))
     ai = {a: i for i, a in enumerate(ang)}
     fi = {f: i for i, f in enumerate(frq)}
+
+    grid = np.zeros((len(ang), len(frq)))
+    complex_cols = bool(rows) and rows[0].get("re") and rows[0].get("im")
+    re = np.zeros((len(ang), len(frq))) if complex_cols else None
+    im = np.zeros((len(ang), len(frq))) if complex_cols else None
+
     for r in rows:
-        grid[ai[float(r["angle_cmd_deg"])], fi[float(r["freq_hz"])]] = \
-            float(r["mag_db"])
-    return ang, frq, grid.tolist()
+        i, j = ai[float(r["angle_cmd_deg"])], fi[float(r["freq_hz"])]
+        grid[i, j] = float(r["mag_db"])
+        if complex_cols:
+            re[i, j], im[i, j] = float(r["re"]), float(r["im"])
+
+    # Rounded to what _trace_payload sends, so a stored run and a live one are
+    # the same numbers on the wire. The CSV keeps full precision; the display
+    # cannot use it, and a 72x1601 grid of 17-digit floats is megabytes of JSON
+    # spent carrying digits below the instrument's own noise floor.
+    return (ang, frq, np.round(grid, 4).tolist(),
+            np.round(re, 6).tolist() if complex_cols else None,
+            np.round(im, 6).tolist() if complex_cols else None)
 
 
 # --------------------------------------------------------------------------

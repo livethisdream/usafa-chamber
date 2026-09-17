@@ -288,6 +288,14 @@
           <div class="header-actions">
             <span class="status-pill" id="mode-badge">offline</span>
             <span class="status-pill" id="corr-badge" title="VNA error-correction state" hidden>CAL</span>
+            <!-- Run type sits beside the button it re-aims, not in the
+                 accordion: it decides whether the tower turns, and nobody
+                 should have to scroll to find out that it will. -->
+            <select class="modern-select compact" id="run-type"
+                    title="Pattern sweeps the angle grid; a single sweep measures where the axis already stands">
+              <option value="pattern">Pattern scan</option>
+              <option value="single">Single sweep</option>
+            </select>
             <button class="btn btn-danger btn-small" id="btn-stop">STOP</button>
             <button class="btn btn-primary btn-small" id="btn-scan">Start scan</button>
           </div>
@@ -318,10 +326,26 @@
           <div class="chart-wrapper tab-content" id="tab-vna">
             <div class="tab-pane">
               <div class="pane-header">
-                <h3>Spectrum at current angle</h3>
-                <span class="status-pill" id="trace-label">latest cut</span>
+                <h3>Sweep at current angle</h3>
+                <div class="pane-tools">
+                  <!-- Formats, not modes. Every entry here is a transform of
+                       the vector already in hand, so switching costs nothing
+                       and never re-measures. -->
+                  <label class="inline-field"><span>Format</span>
+                    <select class="modern-select" id="trace-format">
+                      <option value="mag">Magnitude (dB)</option>
+                      <option value="phase">Phase (deg)</option>
+                      <option value="vswr">VSWR</option>
+                      <option value="smith">Smith</option>
+                    </select>
+                  </label>
+                  <span class="status-pill" id="trace-label">latest cut</span>
+                </div>
               </div>
-              <div class="pane-body"><div id="chart-rect" class="chart"></div></div>
+              <div class="pane-body">
+                <div id="chart-rect" class="chart"></div>
+                <div id="chart-smith" class="chart" hidden></div>
+              </div>
             </div>
           </div>
 

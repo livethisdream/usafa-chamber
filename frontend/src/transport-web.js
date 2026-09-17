@@ -57,6 +57,7 @@ export function createWebTransport(callbacks = {}) {
                 case 'position':    callbacks.onPosition?.(data.deg); break;
                 case 'scan_started':callbacks.onScanStarted?.(data); break;
                 case 'scan_point':  callbacks.onScanPoint?.(data); break;
+                case 'sweep':       callbacks.onSweep?.(data); break;
                 case 'scan_done':   callbacks.onScanDone?.(data); break;
                 case 'cal_started': callbacks.onCalStarted?.(data); break;
                 case 'cal_step':    callbacks.onCalStep?.(data); break;
@@ -90,6 +91,7 @@ export function createWebTransport(callbacks = {}) {
         invoke,
         getState:    ()      => invoke('get_state'),
         startScan:   (p)     => invoke('start_scan', p),
+        sweepOnce:   (p)     => invoke('sweep_once', p),
         cancelScan:  ()      => invoke('cancel_scan'),
         stop:        ()      => invoke('stop'),
         jog:         (a)     => invoke('jog', a),

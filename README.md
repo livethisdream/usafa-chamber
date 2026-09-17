@@ -47,7 +47,35 @@ The simulator preserves the WebSocket payload contract exactly, so anything buil
 against it works unchanged on the real rig. It synthesizes an array-factor pattern
 (main lobe, decaying sidelobes, nulls floored at −45 dB) and simulates slew at a
 believable rate, so live position, progress and the stop button all have something
-real to exercise.
+real to exercise. Ask it for a reflection parameter and it synthesizes a resonance
+instead — a series RLC match, about −17 dB return loss at band center — because
+handing back the pattern envelope for S11 would pin the Smith locus to the rim and
+make the impedance formats impossible to develop against.
+
+## Two ways to measure
+
+The run-type selector beside **Start scan** decides whether the tower turns. That
+is the only distinction the rig makes:
+
+| Run type | What happens | Output |
+|---|---|---|
+| **Pattern scan** | walks the angle grid, sweeping at each stop | `runs/<name>/pattern.csv` + `meta.json` |
+| **Single sweep** | one sweep where the axis already stands | nothing on disk; straight to the plot |
+
+Everything else is a *display* choice. The **Format** control on the VNA tab
+offers magnitude, phase, VSWR and a Smith chart, and all four are transforms of
+one measured vector — switching between them never goes back to the instrument.
+Both acquisitions carry the complex value, not just magnitude, which is what
+makes that true; `pattern.csv` has always had the `re`/`im` columns, so a stored
+run opens on a Smith chart without being re-measured.
+
+VSWR and the Smith chart are offered only for a reflection parameter (S11, S22)
+and are greyed out with the reason otherwise: both describe what a port
+reflects, and computing either from S21 produces a confident number about
+nothing. A single sweep warns about correction state and calibration drift
+exactly as a scan does — more importantly, in fact, since a pattern is
+normalized to its own peak and survives an uncalibrated run, while an impedance
+locus does not.
 
 ### Checking the drivers
 

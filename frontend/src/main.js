@@ -22,14 +22,28 @@ const $ = (id) => document.getElementById(id);
 const state = {
     connected: false,
     scanning: false,
+    sweeping: false,
     mode: null,
     calibrating: false,
     calibration: null,
     angles: [],
     freqs: [],
     grid: [],
+    // The frequency axis of the trace on the VNA tab, which is not always the
+    // pattern's: a single sweep can be taken at a different span entirely, and
+    // overwriting `freqs` with it would silently re-label the pattern's cut
+    // picker and mis-match the imported reference.
+    traceFreqs: [],
     cutIndex: 0,
     lastTrace: null,
+    // The complex vector behind lastTrace. Phase, VSWR and the Smith locus are
+    // all read from here, so choosing a format never costs a measurement.
+    lastRe: null,
+    lastIm: null,
+    // Which S-parameter the data on screen actually is, as measured - not what
+    // the form currently says. They differ the moment somebody retunes the
+    // sidebar after a run, and the format gating has to follow the data.
+    parameter: null,
     lastAngle: null,
     commanded: null,
     done: 0,
@@ -103,6 +117,28 @@ function initPlots() {
         yaxis: { title: { text: 'Magnitude (dB)', font: { size: 10 } },
                  gridcolor: c.grid, zerolinecolor: c.grid },
     }, PLOT_CONFIG);
+
+    // Its own div rather than a format switch on chart-rect: a Smith subplot
+    // and a cartesian one cannot share axes, and tearing one down to build the
+    // other on every change of format throws away the trace's hover state.
+    Plotly.newPlot('chart-smith', [{
+        type: 'scattersmith', mode: 'lines', real: [], imag: [],
+        line: { color: c.secondary, width: 1.8 },
+        hovertemplate: '%{customdata[0]:.4f} GHz<br>'
+                     + 'z %{real:.3f} %{imag:+.3f}j<br>'
+                     + '|Γ| %{customdata[1]:.3f}   VSWR %{customdata[2]:.2f}'
+                     + '<extra></extra>',
+    }], {
+        ...baseLayout(),
+        margin: { l: 30, r: 30, t: 20, b: 20 },
+        smith: {
+            bgcolor: 'rgba(0,0,0,0)',
+            realaxis: { gridcolor: c.grid, linecolor: c.grid,
+                        tickfont: { size: 9 } },
+            imaginaryaxis: { gridcolor: c.grid, linecolor: c.grid,
+                             tickfont: { size: 9 } },
+        },
+    }, PLOT_CONFIG);
 }
 
 function restylePlots() {
@@ -121,6 +157,13 @@ function restylePlots() {
         'yaxis.gridcolor': c.grid, 'yaxis.zerolinecolor': c.grid,
     });
     Plotly.restyle('chart-rect', { 'line.color': c.secondary });
+    Plotly.relayout('chart-smith', {
+        'font.color': c.muted,
+        'smith.realaxis.gridcolor': c.grid, 'smith.realaxis.linecolor': c.grid,
+        'smith.imaginaryaxis.gridcolor': c.grid,
+        'smith.imaginaryaxis.linecolor': c.grid,
+    });
+    Plotly.restyle('chart-smith', { 'line.color': c.secondary });
     dial.draw();
 }
 
@@ -202,14 +245,145 @@ function redrawPolar() {
     updateDelta();
 }
 
-function redrawRect() {
-    if (!state.lastTrace || !state.freqs.length) return;
-    Plotly.update('chart-rect', {
-        x: [state.freqs.map((f) => f / 1e9)],
-        y: [state.lastTrace],
-    });
-    $('trace-label').textContent = state.lastAngle === null
+// ---------------------------------------------------------------------------
+// Trace formats
+//
+// Every format below is a transform of one measured vector, never a second
+// measurement. Magnitude works from mag_db alone so a file with no complex
+// columns still plots; the rest need re/im and say so by being unavailable.
+//
+// VSWR and the Smith chart are additionally gated on the parameter being a
+// reflection term. Both describe what a port reflects, and computing either
+// from S21 produces a confident number about nothing at all.
+// ---------------------------------------------------------------------------
+
+const REFLECTION = new Set(['S11', 'S22']);
+
+/** VSWR ceiling. |Γ| → 1 sends VSWR to infinity, and an open or short at a band
+ *  edge is a perfectly ordinary reading — so one point would otherwise stretch
+ *  the axis until the matched region is a flat line at the bottom. 50 is far
+ *  past anything useful (return loss −0.35 dB) and keeps the axis legible. */
+const VSWR_MAX = 50;
+
+const FORMATS = {
+    mag:   { label: 'Magnitude (dB)', axis: 'Magnitude (dB)' },
+    phase: { label: 'Phase (deg)', axis: 'Phase (deg)', needsComplex: true },
+    vswr:  { label: 'VSWR', axis: 'VSWR', needsComplex: true, needsReflection: true },
+    smith: { label: 'Smith', needsComplex: true, needsReflection: true, smith: true },
+};
+
+/** The parameter the displayed data was measured with, falling back to the form
+ *  value so the picker is sensible before anything has been swept. */
+function activeParameter() {
+    return state.parameter || $('f-param').value;
+}
+
+function formatAvailable(key) {
+    const f = FORMATS[key];
+    if (!f) return false;
+    if (f.needsComplex && !state.lastRe) return false;
+    if (f.needsReflection && !REFLECTION.has(activeParameter())) return false;
+    return true;
+}
+
+/**
+ * Grey out what the data cannot support, and fall back if the current choice
+ * just became one of them — switching to S21 while sitting on a Smith chart
+ * must not leave the last reflection locus on screen captioned as S21.
+ */
+function syncFormats() {
+    const sel = $('trace-format');
+    let fallback = false;
+    for (const opt of sel.options) {
+        const ok = formatAvailable(opt.value);
+        opt.disabled = !ok;
+        const f = FORMATS[opt.value];
+        opt.textContent = ok ? f.label
+            : `${f.label} — ${f.needsReflection && !REFLECTION.has(activeParameter())
+                ? `${activeParameter()} is not a reflection` : 'no complex data'}`;
+        if (!ok && sel.value === opt.value) fallback = true;
+    }
+    if (fallback) sel.value = 'mag';
+    return sel.value;
+}
+
+/** |Γ| per point, from the complex vector. */
+function gammaMag() {
+    return state.lastRe.map((re, i) => Math.hypot(re, state.lastIm[i]));
+}
+
+function vswrOf(g) {
+    return g >= 1 ? VSWR_MAX : Math.min((1 + g) / (1 - g), VSWR_MAX);
+}
+
+/**
+ * The impedance locus, normalized to Z0, plus what the hover should say.
+ *
+ * Plotly draws its Smith trace on the *impedance* plane — `real` is resistance,
+ * `imag` is reactance — not on the reflection-coefficient plane. Handing it Γ
+ * directly looks plausible and is a chart of nothing: every point whose real
+ * part is negative falls outside r = 0 and is silently clipped, which on a
+ * well-matched antenna deletes precisely the resonance you went looking for.
+ * So convert, which is what a Smith chart has always meant anyway:
+ *
+ *     z = (1 + Γ) / (1 - Γ)
+ *
+ * Frequency rides along in customdata because a locus without it is a pretty
+ * curve: reading a Smith chart means knowing which way round it you are.
+ */
+function impedanceLocus() {
+    const re = [], im = [], hover = [];
+    for (let i = 0; i < state.lastRe.length; i++) {
+        const a = state.lastRe[i], b = state.lastIm[i];
+        // An exact open circuit puts z at infinity. Measured data never lands
+        // there, but the floor stops one stray point turning into NaN and
+        // taking the rest of the line with it.
+        const d = Math.max((1 - a) * (1 - a) + b * b, 1e-12);
+        re.push((1 - a * a - b * b) / d);
+        im.push(2 * b / d);
+        const g = Math.hypot(a, b);
+        hover.push([state.traceFreqs[i] / 1e9, g, vswrOf(g)]);
+    }
+    return { re, im, hover };
+}
+
+function formatValues(key) {
+    switch (key) {
+        case 'phase':
+            return state.lastRe.map((re, i) =>
+                Math.atan2(state.lastIm[i], re) * 180 / Math.PI);
+        case 'vswr':
+            return gammaMag().map(vswrOf);
+        default:
+            return state.lastTrace;
+    }
+}
+
+function redrawTrace() {
+    const key = syncFormats();
+    const smith = FORMATS[key].smith;
+    $('chart-rect').hidden = smith;
+    $('chart-smith').hidden = !smith;
+
+    if (state.lastTrace && state.traceFreqs.length) {
+        if (smith) {
+            const z = impedanceLocus();
+            Plotly.update('chart-smith',
+                          { real: [z.re], imag: [z.im], customdata: [z.hover] });
+        } else {
+            Plotly.update('chart-rect', {
+                x: [state.traceFreqs.map((f) => f / 1e9)],
+                y: [formatValues(key)],
+            }, { 'yaxis.title.text': FORMATS[key].axis });
+        }
+    }
+
+    const where = state.lastAngle === null
         ? 'latest cut' : `cut at ${state.lastAngle.toFixed(1)}°`;
+    $('trace-label').textContent = `${activeParameter()}, ${where}`;
+    // A chart that was display:none measured zero, so the one just revealed
+    // comes back the wrong size unless it is told to look again.
+    requestAnimationFrame(() => resizeChart(smith ? 'chart-smith' : 'chart-rect'));
 }
 
 function populateCutFreqs() {
@@ -549,16 +723,26 @@ function setPosition(deg) {
 }
 
 const SCAN_INPUTS = ['f-start', 'f-stop', 'f-points', 'f-ifbw', 'f-power', 'f-param',
-                     'a-start', 'a-stop', 'a-step', 'a-speed', 'jog-abs', 'btn-goto',
-                     'btn-zero', 'run-name'];
+                     'a-speed', 'jog-abs', 'btn-goto', 'btn-zero', 'run-name'];
+
+// The angle grid, which only a pattern scan consumes.
+const ANGLE_INPUTS = ['a-start', 'a-stop', 'a-step'];
 
 function syncControls() {
-    const busy = state.scanning || state.calibrating || !state.connected;
+    const single = $('run-type').value === 'single';
+    const busy = state.scanning || state.sweeping || state.calibrating
+              || !state.connected;
     SCAN_INPUTS.forEach((id) => { const el = $(id); if (el) el.disabled = busy; });
     document.querySelectorAll('[data-jog]').forEach((b) => { b.disabled = busy; });
+    // A single sweep has no angle grid, so the fields that describe one stay
+    // out of the way rather than sitting there implying they will be honored.
+    ANGLE_INPUTS.forEach((id) => { const el = $(id); if (el) el.disabled = busy || single; });
     $('btn-scan').disabled = busy;
     $('btn-scan').textContent = state.scanning ? 'Scanning…'
-                             : state.calibrating ? 'Calibrating…' : 'Start scan';
+                             : state.sweeping ? 'Sweeping…'
+                             : state.calibrating ? 'Calibrating…'
+                             : single ? 'Sweep once' : 'Start scan';
+    $('run-type').disabled = busy;
     $('btn-cal').disabled = busy;
     // Stop stays enabled whenever there is a link: it is the one control that
     // must always be reachable, and the service preempts rather than queues.
@@ -641,7 +825,9 @@ const transport = createTransport({
         }
         state.angles = m.angles;
         state.freqs = m.freqs;
+        state.traceFreqs = m.freqs;
         state.grid = new Array(m.angles.length).fill(null);
+        state.parameter = m.params?.parameter || null;
         state.done = 0;
         populateCutFreqs();
         $('progress-fill').style.width = '0%';
@@ -659,6 +845,8 @@ const transport = createTransport({
     onScanPoint: (m) => {
         state.grid[m.index] = m.mag_db;
         state.lastTrace = m.mag_db;
+        state.lastRe = m.re;
+        state.lastIm = m.im;
         state.lastAngle = m.angle_actual;
         state.commanded = m.angle_cmd;
         state.done = m.index + 1;
@@ -669,7 +857,26 @@ const transport = createTransport({
         $('stat-remaining').textContent = `${Math.max(0, n - state.done)}`;
         dial.setData({ done: state.done, commanded: m.angle_cmd });
         redrawPolar();
-        redrawRect();
+        redrawTrace();
+    },
+    /**
+     * A single sweep. The tower did not move, so nothing here touches the
+     * angle grid, the dial or the polar plot - a one-angle pattern is not a
+     * pattern, and drawing one point on the rings would imply it was.
+     */
+    onSweep: (m) => {
+        state.traceFreqs = m.freqs;
+        state.parameter = m.parameter;
+        state.lastTrace = m.mag_db;
+        state.lastRe = m.re;
+        state.lastIm = m.im;
+        state.lastAngle = m.angle;
+        setCorrection(m.correction, state.mode);
+        if (m.cal_mismatch?.length) {
+            addLog('warn', 'vna',
+                   `this sweep does not match the calibration: ${m.cal_mismatch.join('; ')}`);
+        }
+        redrawTrace();
     },
     onScanDone: (m) => {
         state.scanning = false;
@@ -806,17 +1013,25 @@ async function guard(fn) {
     catch (e) { addLog('error', 'cmd', e.message); }
 }
 
-function scanParams() {
-    const p = {
-        start_deg: parseFloat($('a-start').value),
-        stop_deg: parseFloat($('a-stop').value),
-        step_deg: parseFloat($('a-step').value),
+/** The sweep half of the scan form: everything a single sweep needs, and
+ *  nothing about angles, because it does not move the axis. */
+function sweepParams() {
+    return {
         start_hz: parseFloat($('f-start').value) * 1e9,
         stop_hz: parseFloat($('f-stop').value) * 1e9,
         points: parseInt($('f-points').value, 10),
         if_bw_hz: parseFloat($('f-ifbw').value),
         power_dbm: parseFloat($('f-power').value),
         parameter: $('f-param').value,
+    };
+}
+
+function scanParams() {
+    const p = {
+        ...sweepParams(),
+        start_deg: parseFloat($('a-start').value),
+        stop_deg: parseFloat($('a-stop').value),
+        step_deg: parseFloat($('a-step').value),
     };
     // Left empty, the key is omitted entirely so the service stamps its own
     // name; an empty string would create a directory called "".
@@ -856,11 +1071,18 @@ async function loadRun(name) {
     if (!d) return;
     state.angles = d.angles;
     state.freqs = d.freqs;
+    state.traceFreqs = d.freqs;
     state.grid = d.mag_db;
+    state.parameter = d.meta?.params?.parameter || null;
     state.done = d.angles.length;
     populateCutFreqs();
     if (reference.cuts) fillFreqPicker();
-    state.lastTrace = d.mag_db[d.mag_db.length - 1];
+    const last = d.mag_db.length - 1;
+    state.lastTrace = d.mag_db[last];
+    // Null for a run written before the complex columns existed, or imported
+    // from elsewhere. syncFormats() reads that and hides what it cannot draw.
+    state.lastRe = d.re ? d.re[last] : null;
+    state.lastIm = d.im ? d.im[last] : null;
     state.lastAngle = d.angles[d.angles.length - 1];
     $('progress-label').textContent = 'loaded';
     $('progress-fill').style.width = '100%';
@@ -868,21 +1090,59 @@ async function loadRun(name) {
     dial.setData({ grid: d.angles, done: d.angles.length, commanded: null });
     dial.draw();
     redrawPolar();
-    redrawRect();
+    redrawTrace();
     addLog('info', 'runs', `loaded ${name}: ${d.angles.length} angles`);
 }
 
+/**
+ * Resize a chart, unless it is not being displayed at all.
+ *
+ * Plotly throws on a div with no box rather than no-opping, and the VNA pane
+ * always has exactly one of its two charts switched off. Inactive *tabs* are
+ * hidden with visibility, which keeps their layout and their size, so this
+ * tests for a box rather than for being on screen - the tabs must keep
+ * resizing while hidden or they come back wrong.
+ */
+function resizeChart(id) {
+    const el = $(id);
+    if (el && el.offsetWidth > 0 && el.offsetHeight > 0) Plotly.Plots.resize(el);
+}
+
 function resizeAll() {
-    Plotly.Plots.resize('chart-polar');
-    Plotly.Plots.resize('chart-rect');
+    resizeChart('chart-polar');
+    resizeChart('chart-rect');
+    resizeChart('chart-smith');
     dial.resize();
 }
 
 function wire() {
+    // One button, two acquisitions. The difference is whether the tower turns,
+    // which is the only thing about "pattern vs S-parameters" the rig cares
+    // about; how the result is drawn is settled later, on the plot.
     $('btn-scan').addEventListener('click', async () => {
+        if ($('run-type').value === 'single') {
+            state.sweeping = true;
+            syncControls();
+            try {
+                await guard(() => transport.sweepOnce(sweepParams()));
+            } finally {
+                state.sweeping = false;
+                syncControls();
+            }
+            return;
+        }
         const speed = parseFloat($('a-speed').value);
         if (Number.isFinite(speed)) await guard(() => transport.setSpeed(speed));
         await guard(() => transport.startScan(scanParams()));
+    });
+
+    $('run-type').addEventListener('change', syncControls);
+    $('trace-format').addEventListener('change', redrawTrace);
+    // The sidebar's parameter decides which formats are even meaningful, but
+    // only once something has been measured with it - so the picker follows the
+    // form until data arrives and the data's own parameter takes over.
+    $('f-param').addEventListener('change', () => {
+        if (!state.lastTrace) { state.parameter = null; syncFormats(); }
     });
 
     $('btn-stop').addEventListener('click', () => guard(() => transport.stop()));
@@ -962,6 +1222,10 @@ wireChrome();
 wire();
 applyTheme(localStorage.getItem(THEME_KEY) || 'system', false);
 updateAngleCount();
+// Gate the format picker before anything has been measured, so it opens
+// describing what it can draw rather than offering four choices and failing on
+// three of them.
+redrawTrace();
 setConnected(false);
 transport.connect();
 
