@@ -409,6 +409,30 @@ def check_cal_no_apply(r, outdir):
     return "cal that applied nothing reported as a failure"
 
 
+def s_cal_error_surfaced():
+    # The 2026-09-17 fault, reproduced: the cal is accepted, applies nothing,
+    # and the only account of why is one line in the error queue. Reading that
+    # queue empties it, so if the driver does not carry the text into the
+    # exception it is gone for good and the dashboard can only say "correction
+    # is off" - which is what sent somebody probing SCPI by hand for an hour.
+    return {"acm_error": '-230,"Auto-Orientation Error for Analyzer Port(s): 1"',
+            "_target": "cal"}, []
+
+
+def check_cal_error_surfaced(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    done = r["cal"].get("done") or {}
+    assert done.get("ok") is False, "a cal that applied nothing claimed success"
+    msg = done.get("error") or ""
+    assert "Auto-Orientation" in msg, (
+        f"the instrument said why and the operator never saw it: {msg!r}")
+    assert "Port(s): 1" in msg, (
+        f"the faulty port was named and then dropped: {msg!r}")
+    assert r["cleared"] >= 1, "nothing was cleared after a cal that did not apply"
+    assert not r["cal"].get("saved"), "a failed cal wrote a record"
+    return "instrument's reason reached the operator, naming the port"
+
+
 def s_cal_cancelled():
     # Cancel before the first command goes out. This is the only place cancel
     # can act - a running AutoCal has nowhere to poll - and the point is that
@@ -491,6 +515,7 @@ SCENARIOS = [
     ("cal_unsupported", s_cal_unsupported, check_cal_unsupported),
     ("cal_fails", s_cal_fails_midway, check_cal_fails_midway),
     ("cal_no_apply", s_cal_no_apply, check_cal_no_apply),
+    ("cal_error_surfaced", s_cal_error_surfaced, check_cal_error_surfaced),
     ("cal_cancelled", s_cal_cancelled, check_cal_cancelled),
     ("cal_vs_scan", s_cal_refused_while_scanning, check_cal_refused_while_scanning),
     ("cal_mismatch", s_cal_sweep_mismatch, check_cal_sweep_mismatch),

@@ -436,12 +436,19 @@ class Vna:
             raise
         finally:
             self.io.timeout = saved
-        self._check_errors("after AutoCal")
+        err = self._check_errors("after AutoCal")
         state = self.correction_state()
         if not correction_is_on(state):
             # The command returned and correction is still off. Something was
             # collected and not applied; do not leave that sitting there.
             self.acm_clear()
+            # Lead with the instrument's own words when it gave any. A failed
+            # auto-orientation names the port it could not see, which is the
+            # whole diagnosis; "correction is off" alone sends somebody
+            # hunting through the SCPI by hand to find out why.
+            if err:
+                raise RuntimeError(
+                    f"AutoCal did not apply: {err} (correction is {state!r})")
             raise RuntimeError(
                 f"AutoCal completed but correction is {state!r}, not on - "
                 f"nothing was applied")
@@ -463,13 +470,24 @@ class Vna:
                 f"Trace/channel state does not match the configured sweep.")
         return flat[0::2] + 1j * flat[1::2]
 
-    def _check_errors(self, where: str) -> None:
+    def _check_errors(self, where: str) -> str | None:
+        """Drain one error off the queue; print it and hand it back.
+
+        Returning it is the point. This call is destructive - reading the queue
+        empties it - so a caller that only prints has thrown away the one
+        description of the fault the instrument was ever going to give. A line
+        on a service console is not something the operator sees; an exception
+        message is. Callers that have nothing better to do with it may still
+        ignore the return, which is why the print stays.
+        """
         try:
             err = self.io.query("SYST:ERR?").strip()
         except pyvisa.VisaIOError:
-            return
+            return None
         if err and not err.startswith(("0", "+0")):
             print(f"[vna] error {where}: {err}", file=sys.stderr)
+            return err
+        return None
 
     def close(self) -> None:
         # Hand the instrument back the way we found it, so the front panel is

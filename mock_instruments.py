@@ -76,6 +76,10 @@ class Faults:
     acm_fails: bool = False              # the cal command errors part-way through
     acm_no_apply: bool = False           # cal returns, correction still off
     acm_seconds: float = 0.0             # make the cal take real time, for cancel
+    # The rig's own 2026-09-17 fault: SOLT2 is accepted, returns almost at
+    # once, leaves correction off and queues the reason. A 30 dB pad on port 1
+    # put the module's standards below anything auto-orientation could see.
+    acm_error: str = ""                  # cal returns, correction off, queue holds this
 
 
 @dataclass
@@ -164,6 +168,11 @@ class FakeVna:
             time.sleep(f.acm_seconds)
         if f.acm_fails:
             raise pyvisa.VisaIOError(VI_ERROR_TMO)
+        if f.acm_error:
+            # Accepted, did nothing, said why - but only into the error queue.
+            self.err = f.acm_error
+            self.corrected = False
+            return
         self.corrected = not f.acm_no_apply
 
     # -- pyvisa surface ---------------------------------------------------
