@@ -23,6 +23,10 @@ dependencies, and — on Windows — reports whether the rig is actually ready. 
 downloads or installs drivers for you; where something is missing it names the fault
 and where to get the fix.
 
+On a Linux acquisition PC, `./start.sh` then brings up S2VNA, the service and the
+dashboard in one go, checking each piece first; `./start.sh --sim` does the same
+with no instruments. Ctrl+C stops the service and frontend and leaves S2VNA open.
+
 `.\setup.ps1 -CheckOnly` diagnoses without changing anything, which is safe to run on
 the acquisition PC mid-session. Both scripts are idempotent.
 

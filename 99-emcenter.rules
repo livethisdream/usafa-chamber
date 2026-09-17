@@ -1,0 +1,6 @@
+# ETS-Lindgren EMCenter 7000-series: an FTDI chip with a custom product ID
+# (0403:8570) that the stock ftdi_sio driver does not claim on its own.
+# Teach the driver the ID when the chassis appears, then give its serial port
+# a stable name (/dev/emcenter) that dialout members can open.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="8570", RUN+="/bin/sh -c '/sbin/modprobe ftdi_sio; echo 0403 8570 > /sys/bus/usb-serial/drivers/ftdi_sio/new_id 2>/dev/null || true'"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="8570", GROUP="dialout", MODE="0660", SYMLINK+="emcenter"
