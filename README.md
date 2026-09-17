@@ -6,6 +6,8 @@ Antenna pattern measurement for the USAFA anechoic chamber.
 - **Positioner** — ETS-Lindgren EMControl 7006-001, **slot 1 device A**, in an EMCenter chassis,
   over its FTDI virtual COM port at **115200 8N1**
 
+**Setting up a new computer?** Follow [SETUP_NEW_PC.md](SETUP_NEW_PC.md).
+
 ## First-time setup
 
 ```powershell
