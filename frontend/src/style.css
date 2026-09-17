@@ -122,7 +122,7 @@ h1, h2, h3 { font-family: 'Outfit', 'Inter', sans-serif; }
 .status-indicator { font-weight: 500; }
 
 .status-pill[data-mode="sim"] { color: var(--warn); border-color: rgba(245,158,11,.4); background: rgba(245,158,11,.1); }
-.status-pill[data-mode="hardware"] { color: var(--success); border-color: rgba(16,185,129,.4); background: rgba(16,185,129,.1); }
+.status-pill[data-mode="hw"] { color: var(--success); border-color: rgba(16,185,129,.4); background: rgba(16,185,129,.1); }
 .status-pill.moving { color: var(--warn); border-color: rgba(245,158,11,.4); background: rgba(245,158,11,.1); }
 .status-pill.scanning { color: var(--secondary); border-color: rgba(0,136,209,.45); background: rgba(0,136,209,.12); }
 /* chamber-specific: error-correction state. Uncalibrated is a warning, not an
@@ -627,11 +627,14 @@ h1, h2, h3 { font-family: 'Outfit', 'Inter', sans-serif; }
   align-items: center;
   text-align: center;
 }
+/* Labels are lowercase in the markup rather than transformed, so the delta in
+   "Δ ref" survives - text-transform: lowercase would render it as a small
+   delta, which means something else. Tracking is lighter than it was for the
+   uppercase form, which needed the air; lowercase does not. */
 .stat-label {
   font-size: 0.6rem;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
+  letter-spacing: 0.3px;
 }
 .stat-value {
   font-size: 0.86rem;

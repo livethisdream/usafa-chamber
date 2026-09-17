@@ -286,8 +286,6 @@
           <!-- Scan and STOP live here rather than in the accordion: STOP is the
                one control that must never be a scroll away. -->
           <div class="header-actions">
-            <span class="status-pill" id="mode-badge">offline</span>
-            <span class="status-pill" id="corr-badge" title="VNA error-correction state" hidden>CAL</span>
             <button class="btn btn-danger btn-small" id="btn-stop">STOP</button>
             <button class="btn btn-primary btn-small" id="btn-scan">Start scan</button>
           </div>
@@ -334,11 +332,11 @@
               <div class="pane-body dial-body">
                 <canvas id="dial"></canvas>
                 <div class="dial-readout">
-                  <div class="stat-box"><span class="stat-label">Commanded</span><span class="stat-value" id="stat-cmd">—</span></div>
-                  <div class="stat-box"><span class="stat-label">Actual</span><span class="stat-value" id="angle-readout">—</span></div>
-                  <div class="stat-box"><span class="stat-label">Speed</span><span class="stat-value" id="speed-readout">—</span></div>
-                  <div class="stat-box"><span class="stat-label">Grid</span><span class="stat-value" id="stat-grid">—</span></div>
-                  <div class="stat-box"><span class="stat-label">Remaining</span><span class="stat-value" id="stat-remaining">—</span></div>
+                  <div class="stat-box"><span class="stat-label">commanded</span><span class="stat-value" id="stat-cmd">—</span></div>
+                  <div class="stat-box"><span class="stat-label">actual</span><span class="stat-value" id="angle-readout">—</span></div>
+                  <div class="stat-box"><span class="stat-label">speed</span><span class="stat-value" id="speed-readout">—</span></div>
+                  <div class="stat-box"><span class="stat-label">grid</span><span class="stat-value" id="stat-grid">—</span></div>
+                  <div class="stat-box"><span class="stat-label">remaining</span><span class="stat-value" id="stat-remaining">—</span></div>
                 </div>
               </div>
             </div>
@@ -357,12 +355,16 @@
         </div>
 
         <div class="chart-stats">
-          <div class="stat-box compact"><span class="stat-label">Angle</span><span class="stat-value" id="stat-angle">—</span></div>
-          <div class="stat-box compact"><span class="stat-label">Cut</span><span class="stat-value" id="stat-cut">—</span></div>
-          <div class="stat-box compact"><span class="stat-label">Peak</span><span class="stat-value" id="stat-peak">—</span></div>
-          <div class="stat-box compact"><span class="stat-label">Progress</span><span class="stat-value" id="progress-label">idle</span></div>
+          <div class="stat-box compact"><span class="stat-label">angle</span><span class="stat-value" id="stat-angle">—</span></div>
+          <div class="stat-box compact"><span class="stat-label">cut</span><span class="stat-value" id="stat-cut">—</span></div>
+          <div class="stat-box compact"><span class="stat-label">peak</span><span class="stat-value" id="stat-peak">—</span></div>
+          <div class="stat-box compact"><span class="stat-label">progress</span><span class="stat-value" id="progress-label">idle</span></div>
           <div class="stat-box compact" id="stat-box-delta" hidden><span class="stat-label">Δ ref</span><span class="stat-value" id="stat-delta">—</span></div>
           <div class="stats-spacer"></div>
+          <!-- Backend, correction and link state read as one group: all three
+               answer "what am I actually talking to right now?" -->
+          <span class="status-pill" id="mode-badge">offline</span>
+          <span class="status-pill" id="corr-badge" title="VNA error-correction state" hidden>cal</span>
           <div class="status-indicator">
             <div class="dot" id="conn-dot" title="disconnected"></div>
             <span id="conn-text">disconnected</span>

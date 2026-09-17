@@ -395,17 +395,17 @@ function setCorrection(raw, mode) {
     badge.hidden = false;
     if (on === true) {
         kv.textContent = `on (${raw})`;
-        badge.textContent = 'CAL';
+        badge.textContent = 'cal';
         badge.className = 'status-pill corr-on';
         badge.title = 'error correction on - this run is calibrated';
     } else if (on === false) {
-        kv.textContent = `OFF (${raw})`;
-        badge.textContent = 'UNCAL';
+        kv.textContent = `off (${raw})`;
+        badge.textContent = 'uncal';
         badge.className = 'status-pill corr-off';
         badge.title = 'error correction off - this run is uncalibrated';
     } else {
         kv.textContent = `unknown (${raw})`;
-        badge.textContent = 'CAL?';
+        badge.textContent = 'cal?';
         badge.className = 'status-pill corr-unknown';
         badge.title = 'the VNA did not answer SENS:CORR:STAT?';
     }
@@ -523,7 +523,7 @@ function calLog(text) {
 
 function applyState(s) {
     if (!s) return;
-    $('mode-badge').textContent = s.mode === 'sim' ? 'SIMULATED' : 'HARDWARE';
+    $('mode-badge').textContent = s.mode === 'sim' ? 'simulated' : 'hardware';
     $('mode-badge').dataset.mode = s.mode;
     state.mode = s.mode;
     $('vna-idn').textContent = s.vna_idn || '—';
