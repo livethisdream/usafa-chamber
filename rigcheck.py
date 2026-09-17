@@ -140,7 +140,7 @@ def s_error_retry():
 
 def check_error_retry(r, outdir):
     assert r["rc"] == 0, f"exit {r['rc']}: {r['exc']}"
-    assert "resyncing and retrying once" in r["err"], "no retry was logged"
+    assert "resyncing and retrying" in r["err"], "no retry was logged"
     a = _angles(outdir)
     assert a == [0.0, 90.0, 180.0, 270.0], a
     return "one ERROR absorbed by the retry, scan completed"
@@ -164,7 +164,7 @@ def s_query_error():
 
 def check_query_error(r, outdir):
     assert r["rc"] == 0, f"exit {r['rc']}: {r['exc']}"
-    assert "resyncing and retrying once" in r["err"], "no query retry logged"
+    assert "resyncing and retrying" in r["err"], "no query retry logged"
     return "ERROR on a query resynced and re-read"
 
 
@@ -265,6 +265,48 @@ def check_service_stops(r, outdir):
     assert r["stops"], (
         "the service worker reported the failure and left the axis alone")
     return f"worker stopped the axis at {r['stops']} before reporting"
+
+
+def s_scan_negative_angles():
+    # A cut across boresight: -90 to -80, on a card whose limits allow it.
+    # Every angle must reach the card exactly as asked. -90 and 270 are the
+    # same position reached by turning opposite ways, and the tower has a
+    # cable through it, so a helpful-looking `% 360` picks the direction for
+    # the operator and can wind the cable up.
+    return {"_target": "service"}, ["--step", "5", "--start", "-90",
+                                    "--stop", "-80"]
+
+
+def check_scan_negative_angles(r, outdir):
+    assert r["rc"] == 0, f"the scan across boresight failed: {r['exc']}"
+    assert r["seeks"], "no seek was issued at all"
+    rewritten = [s for s in r["seeks"] if s > 180.0]
+    assert not rewritten, (
+        f"angles were normalised into 0-360 before being sent: {rewritten}. "
+        f"That reaches the same positions by turning the other way.")
+    assert any(s < 0 for s in r["seeks"]), (
+        f"a scan starting at -90 sent no negative target at all: {r['seeks']}")
+    return f"sent {r['seeks']} unmodified"
+
+
+def s_scan_outside_limits():
+    # The rig as it shipped: CCW limit 0, so the card refuses every negative
+    # target with ERROR 3. Nothing in software can read the limits back - UL?
+    # and LL? are rejected - so the only honest thing is to fail loudly rather
+    # than quietly rewrite the angle into one the card will accept.
+    return {"_target": "service", "ccw_limit_deg": 0.0}, \
+        ["--step", "5", "--start", "-90", "--stop", "-80"]
+
+
+def check_scan_outside_limits(r, outdir):
+    blob = r["err"] + r["exc"]
+    assert "ERROR 3" in blob or "rejected" in blob, (
+        f"a target outside the travel limits was not surfaced: {blob[-300:]}")
+    rewritten = [s for s in r["seeks"] if s > 180.0]
+    assert not rewritten, (
+        f"the angle was rewritten to dodge the limit: {rewritten}. The tower "
+        f"would have turned the long way round instead of refusing.")
+    return "out-of-range target refused rather than silently redirected"
 
 
 def check_trigger_restored(r, outdir):
@@ -507,6 +549,8 @@ SCENARIOS = [
     ("sweep_time", s_sweep_time_unsupported, check_sweep_time_unsupported),
     ("trigger_restore", s_trigger_restored, check_trigger_restored),
     ("service_stops", s_service_stops, check_service_stops),
+    ("scan_negative_angles", s_scan_negative_angles, check_scan_negative_angles),
+    ("scan_outside_limits", s_scan_outside_limits, check_scan_outside_limits),
     ("uncalibrated", s_uncalibrated, check_uncalibrated),
     ("correction_mute", s_correction_mute, check_correction_mute),
     ("meta_correction", s_meta_records_correction, check_meta_records_correction),
@@ -540,6 +584,17 @@ def _child(faults_json: str, argv: list[str]) -> int:
         # the split-reply guard was added.
         import re
         pattern_measure.Positioner._POS_RE = re.compile(r"^\s*[-+]?\d")
+        # Also collapse seek() to a single attempt. The retry was added later,
+        # for a different fault, and it happens to rescue this one too: a bogus
+        # position reads as "not where I asked", the move is re-commanded, and
+        # the tower is already there. Leaving it on would make this control
+        # pass whatever the guard did, which is the exact failure mode the
+        # control exists to rule out. Isolate the guard by holding the second
+        # defence still. Patching the config default does not work - a
+        # dataclass bakes its defaults into __init__ at class creation.
+        pattern_measure.Positioner.seek = (
+            lambda self, deg, should_abort=None:
+                self._seek_once(deg, should_abort)[0])
 
     exc = ""
     try:
@@ -559,6 +614,7 @@ def _child(faults_json: str, argv: list[str]) -> int:
         "rc": rc,
         "exc": exc,
         "stops": state.stops,
+        "seeks": state.seeks,
         "sweeps": state.sweeps,
         "trigger_restored": state.trigger_restored,
         "cals": state.cals,
@@ -682,12 +738,17 @@ def _run_service(argv: list[str]) -> int:
     cs.RUNS_DIR = outdir.parent
     step = float(argv[argv.index("--step") + 1])
 
+    def opt(flag, default):
+        return float(argv[argv.index(flag) + 1]) if flag in argv else default
+
+    start, stop = opt("--start", 0.0), opt("--stop", 270.0)
+
     loop = asyncio.new_event_loop()
     try:
         backend = cs.HardwareBackend("TCPIP0::127.0.0.1::5025::SOCKET",
                                      "ASRL16::INSTR", 1, "A")
         svc = cs.ChamberService(backend, loop)
-        svc._run_scan(cs.ScanRequest(start_deg=0.0, stop_deg=270.0,
+        svc._run_scan(cs.ScanRequest(start_deg=start, stop_deg=stop,
                                      step_deg=step, points=21,
                                      name=outdir.name))
     finally:
@@ -718,6 +779,7 @@ def run_one(name: str, setup, check, verbose: bool) -> tuple[bool, str]:
              "cleared": payload.get("cleared", 0),
              "cal": payload.get("cal", {}),
              "stops": payload.get("stops", []),
+             "seeks": payload.get("seeks", []),
              "sweeps": payload.get("sweeps", 0),
              "trigger_restored": payload.get("trigger_restored", False),
              "out": "\n".join(out),

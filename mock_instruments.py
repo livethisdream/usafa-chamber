@@ -60,6 +60,13 @@ class Faults:
     stuck: bool = False                  # reports in-motion forever
     late_start_polls: int = 0            # report complete for N polls before moving
     lag_deg: float = 0.0                 # park this far short of every target
+    # Front-panel travel limits. The card refuses anything outside them with
+    # ERROR 3, and nothing can read them back - 'UL?' and 'LL?' are rejected,
+    # so software cannot know what they are. The chamber runs -180..180, set
+    # 2026-09-17; it shipped as 0..360, which is what made every negative angle
+    # fail. Narrow them in a scenario to reproduce that rig.
+    ccw_limit_deg: float = -180.0
+    cw_limit_deg: float = 360.0
     # -- VNA --------------------------------------------------------------
     drop_sweep: int | None = None        # VI_ERROR_TMO on the Nth data read
     short_sweep: int | None = None       # truncate the Nth sweep, once
@@ -86,6 +93,7 @@ class Faults:
 class State:
     faults: Faults = field(default_factory=Faults)
     stops: list = field(default_factory=list)
+    seeks: list = field(default_factory=list)    # every SK target, exactly as sent
     sweeps: int = 0
     writes: int = 0
     queries: int = 0
@@ -385,7 +393,21 @@ class FakePositioner:
 
         self.s.writes += 1
         if body.startswith("SK "):
-            self.target = float(body.split()[1])
+            target = float(body.split()[1])
+            self.s.seeks.append(target)
+            # The card enforces its front-panel travel limits and answers
+            # ERROR 3 for anything outside them. Verified 2026-09-17: with the
+            # CCW limit at 0 every negative target was refused, including
+            # 'SK -269.0', which is one degree away - so it is the range being
+            # checked, not the sign. Opening the CCW limit to -180 made
+            # 'SK -5.0' succeed and CP? report -5.0. A target already reached
+            # answers OK without validating, which is why a probe that does
+            # not move proves nothing.
+            f = self.s.faults
+            if not (f.ccw_limit_deg <= target <= f.cw_limit_deg):
+                self._pending.append("ERROR 3")
+                return
+            self.target = target
             self._late = 0
         elif body.startswith("CP "):
             self.angle = self.target = float(body.split()[1])

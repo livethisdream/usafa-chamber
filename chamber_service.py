@@ -480,11 +480,18 @@ class ChamberService:
         self._require_idle()
         with self._lock:
             if "delta" in a:
-                target = self.backend.position() + float(a["delta"])
+                # A delta can walk off the end of the travel - +10 from 175 -
+                # so fold it back into the -180..180 the card is set to.
+                target = pm._wrap180(self.backend.position() + float(a["delta"]))
             else:
+                # Absolute targets go exactly as asked. This used to be
+                # `target % 360.0`, which turned -90 into 270: the same place,
+                # reached by turning the opposite way. The tower has a cable
+                # through it, so the direction of travel is the whole point,
+                # and 270 is not a synonym for -90.
                 target = float(a["deg"])
             self._cancel.clear()
-            actual = self.backend.seek(target % 360.0,
+            actual = self.backend.seek(target,
                                        should_abort=self._cancel.is_set)
         self.push({"type": "position", "deg": round(actual, 2)})
         return {"angle": round(actual, 2)}

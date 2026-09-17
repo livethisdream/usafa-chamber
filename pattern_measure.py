@@ -171,6 +171,17 @@ class PositionerConfig:
     move_timeout_s: float = 120.0
     motion_start_timeout_s: float = 3.0   # grace period for the card to report motion
     position_tol_deg: float = 0.5
+    # Link corruption on this rig arrives in bursts, not as lone bytes: a
+    # rejected 'SK' retried immediately is rejected again, and the scan dies
+    # three moves in. Measured 2026-09-17 with the VNA at -30 dBm and its sweep
+    # held off, so this is the link itself and not RF from the chamber. Retries
+    # are spaced rather than immediate, which is what lets them land.
+    link_retries: int = 3          # attempts per command, including the first
+    retry_delay_s: float = 0.25    # pause before re-sending, to outlast a burst
+    # A move that silently does not happen is worse than one that fails: the
+    # sweep is still taken, and the cut is recorded against an angle the tower
+    # never reached. Re-command instead of warning.
+    seek_retries: int = 2          # extra attempts at the move itself
 
 
 @dataclass
@@ -540,48 +551,59 @@ class Positioner:
         finally:
             self.io.timeout = saved
 
-    def _w(self, body: str, _retry: bool = True) -> None:
+    def _w(self, body: str) -> None:
         """Write and check the acknowledgement.
 
         The card answers a good command with 'OK' and a malformed one with
         'ERROR n'. Leaving either unread desynchronizes every later query,
         which then reads the previous command's answer instead of its own.
 
-        An ERROR here is occasionally a corrupted byte on the FTDI link rather
-        than a genuinely bad command - observed once mid-scan on a 'SK' that
-        was provably valid. Aborting a multi-minute scan over one bad byte is
-        the wrong trade, so a rejection is retried once after resynchronizing.
-        Every command sent through here is an idempotent absolute instruction
-        (seek to an angle, define the current angle, stop), so re-sending is
-        safe by construction. The retry warns rather than staying silent, so a
-        link that is genuinely degrading still shows up in the log.
-        """
-        self.io.write(self.cmds.prefix + body)
-        saved, self.io.timeout = self.io.timeout, self.cfg.drain_timeout_ms
-        try:
-            reply = self.io.read().strip()
-        except pyvisa.VisaIOError:
-            reply = ""              # silence is an acceptable success case
-        finally:
-            self.io.timeout = saved
-        if reply and reply.upper().startswith("ERROR"):
-            if _retry:
-                print(f"[pos] {body!r} -> {reply}; resyncing and retrying once",
-                      file=sys.stderr)
-                self._flush_input()
-                return self._w(body, _retry=False)
-            raise RuntimeError(f"positioner rejected {body!r}: {reply}")
+        An ERROR here is usually a corrupted byte on the FTDI link rather than
+        a genuinely bad command - a provably valid 'SK' comes back rejected.
+        Aborting a multi-minute scan over one bad byte is the wrong trade, so a
+        rejection is retried after resynchronizing. Every command sent through
+        here is an idempotent absolute instruction (seek to an angle, define
+        the current angle, stop), so re-sending is safe by construction.
 
-    def _q(self, body: str, _retry: bool = True) -> str:
-        reply = self.io.query(self.cmds.prefix + body).strip()
-        if reply.upper().startswith("ERROR"):
-            if _retry:
-                print(f"[pos] {body!r} -> {reply}; resyncing and retrying once",
-                      file=sys.stderr)
+        The retries are spaced. The corruption comes in bursts, and an
+        immediate re-send lands inside the same burst and is rejected again -
+        which is precisely how a scan died on its third move with the chamber
+        quiet. Every attempt is logged, so a link that is genuinely degrading
+        still shows up rather than being silently absorbed.
+        """
+        last = ""
+        for attempt in range(1, max(1, self.cfg.link_retries) + 1):
+            self.io.write(self.cmds.prefix + body)
+            saved, self.io.timeout = self.io.timeout, self.cfg.drain_timeout_ms
+            try:
+                reply = self.io.read().strip()
+            except pyvisa.VisaIOError:
+                reply = ""          # silence is an acceptable success case
+            finally:
+                self.io.timeout = saved
+            if not (reply and reply.upper().startswith("ERROR")):
+                return
+            last = reply
+            if attempt < max(1, self.cfg.link_retries):
+                print(f"[pos] {body!r} -> {reply}; resyncing and retrying "
+                      f"({attempt}/{self.cfg.link_retries - 1})", file=sys.stderr)
                 self._flush_input()
-                return self._q(body, _retry=False)
-            raise RuntimeError(f"positioner rejected {body!r}: {reply}")
-        return reply
+                time.sleep(self.cfg.retry_delay_s)
+        raise RuntimeError(f"positioner rejected {body!r}: {last}")
+
+    def _q(self, body: str) -> str:
+        last = ""
+        for attempt in range(1, max(1, self.cfg.link_retries) + 1):
+            reply = self.io.query(self.cmds.prefix + body).strip()
+            if not reply.upper().startswith("ERROR"):
+                return reply
+            last = reply
+            if attempt < max(1, self.cfg.link_retries):
+                print(f"[pos] {body!r} -> {reply}; resyncing and retrying "
+                      f"({attempt}/{self.cfg.link_retries - 1})", file=sys.stderr)
+                self._flush_input()
+                time.sleep(self.cfg.retry_delay_s)
+        raise RuntimeError(f"positioner rejected {body!r}: {last}")
 
     # A complete position reply always carries its units: '90.0 DEGREES'.
     _POS_RE = re.compile(r"^[-+]?\d+(?:\.\d+)?\s*DEG", re.I)
@@ -653,8 +675,37 @@ class Positioner:
         than a second thread writing a stop command into the middle of this
         thread's request/response exchange. Serial access stays single-threaded.
         """
+        for attempt in range(1, max(1, self.cfg.seek_retries + 1) + 1):
+            actual, started = self._seek_once(deg, should_abort)
+            if abs(_wrap180(actual - deg)) <= self.cfg.position_tol_deg:
+                return actual
+            last = (actual, started)
+            if attempt <= self.cfg.seek_retries:
+                print(f"[pos] asked {deg:.1f}, read {actual:.1f} - "
+                      f"re-commanding the move "
+                      f"(attempt {attempt}/{self.cfg.seek_retries + 1})",
+                      file=sys.stderr)
+                time.sleep(self.cfg.retry_delay_s)
+
+        actual, started = last
+        if not started:
+            # Never saw motion and we are not where we asked to be: the seek
+            # did not take. Refuse to measure rather than log a bad cut.
+            raise RuntimeError(
+                f"positioner never moved: asked {deg:.1f} deg, still at "
+                f"{actual:.1f} deg after {self.cfg.seek_retries + 1} attempts. "
+                f"Check the slot/device prefix ({self.cmds.prefix!r}) and the "
+                f"seek mnemonic.")
+        raise RuntimeError(
+            f"positioner did not reach {deg:.1f} deg: read {actual:.1f} deg "
+            f"after {self.cfg.seek_retries + 1} attempts "
+            f"({abs(_wrap180(actual - deg)):.2f} deg out). Measuring here "
+            f"would record the cut against an angle the tower never reached.")
+
+    def _seek_once(self, deg: float, should_abort=None) -> tuple[float, bool]:
+        """One attempt at the move. Returns (position, whether motion began)."""
         if abs(_wrap180(self.position() - deg)) <= self.cfg.position_tol_deg:
-            return self.position()          # already parked; no move to wait on
+            return self.position(), True    # already parked; no move to wait on
 
         self._w(self.cmds.seek.format(pos=deg))
 
@@ -680,19 +731,7 @@ class Positioner:
             time.sleep(0.1)
 
         time.sleep(self.cfg.settle_s)                # mechanical ring-down
-        actual = self.position()
-        err = abs(_wrap180(actual - deg))
-        if err > self.cfg.position_tol_deg:
-            if not started:
-                # Never saw motion and we are not where we asked to be: the seek
-                # did not take. Refuse to measure rather than log a bad cut.
-                raise RuntimeError(
-                    f"positioner never moved: asked {deg:.1f} deg, still at "
-                    f"{actual:.1f} deg. Check the slot/device prefix "
-                    f"({self.cmds.prefix!r}) and the seek mnemonic.")
-            print(f"[pos] warning: asked {deg:.1f}, read {actual:.1f} "
-                  f"({err:.2f} deg error)", file=sys.stderr)
-        return actual
+        return self.position(), started
 
     def close(self) -> None:
         try:
