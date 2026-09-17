@@ -334,6 +334,21 @@ class Vna:
         self.io.write("FORM:DATA ASC")
         self._check_errors("after configure")
 
+    def set_parameter(self, parameter: str) -> None:
+        """Point the single trace at another S-parameter, leaving the sweep alone.
+
+        A VNA-only capture wants all four, and configure() would reprogram the
+        whole sweep and re-save the trigger state for each one. This changes
+        only what the trace measures. cfg.parameter is updated with it, because
+        measure() validates its reply against cfg and the two drifting apart is
+        how you get a point-count error that blames the wrong thing.
+        """
+        c = self.ch
+        self.io.write(f"CALC{c}:PAR1:DEF {parameter}")
+        self.io.write(f"CALC{c}:PAR1:SEL")
+        self.cfg.parameter = parameter
+        self._check_errors(f"after selecting {parameter}")
+
     def sweep_time_s(self) -> float | None:
         """Sweep time in seconds, or None when the firmware has no such query.
 

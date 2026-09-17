@@ -280,6 +280,7 @@
               <button class="tab-btn active" data-target="tab-pattern">Pattern Measurement</button>
               <button class="tab-btn" data-target="tab-vna">VNA</button>
               <button class="tab-btn" data-target="tab-turntable">Turntable</button>
+              <button class="tab-btn" data-target="tab-sweep">Sweep</button>
               <button class="tab-btn" data-target="tab-logs">Logs</button>
             </div>
           </div>
@@ -310,6 +311,40 @@
                 </div>
               </div>
               <div class="pane-body"><div id="chart-polar" class="chart"></div></div>
+            </div>
+          </div>
+
+          <!-- VNA-only capture: one sweep at the current position, all four
+               S-parameters, no positioner involvement at all. -->
+          <div class="chart-wrapper tab-content" id="tab-sweep">
+            <div class="tab-pane">
+              <div class="pane-header">
+                <h3>Sweep</h3>
+                <div class="pane-tools">
+                  <button class="btn btn-primary btn-small" id="btn-sweep"
+                          title="Capture S11, S21, S12 and S22 at the sweep settings. The tower is not moved.">Sweep</button>
+                  <label class="inline-field"><span>Marker</span>
+                    <select class="modern-select" id="sweep-marker"></select>
+                  </label>
+                  <button class="btn btn-outline btn-small" id="btn-sweep-export"
+                          title="Save the capture as a Touchstone .s2p file" disabled>Export</button>
+                </div>
+              </div>
+              <div class="pane-body sweep-body">
+                <div class="sweep-charts">
+                  <div id="chart-smith" class="chart"></div>
+                  <div id="chart-sweep-mag" class="chart"></div>
+                </div>
+                <div class="sweep-readout" id="sweep-readout">
+                  <div class="stat-box compact"><span class="stat-label">freq</span><span class="stat-value" id="sw-freq">—</span></div>
+                  <div class="stat-box compact"><span class="stat-label">Z</span><span class="stat-value" id="sw-z">—</span></div>
+                  <div class="stat-box compact"><span class="stat-label">|Γ|</span><span class="stat-value" id="sw-gamma">—</span></div>
+                  <div class="stat-box compact"><span class="stat-label">VSWR</span><span class="stat-value" id="sw-vswr">—</span></div>
+                  <div class="stat-box compact"><span class="stat-label">return loss</span><span class="stat-value" id="sw-rl">—</span></div>
+                  <div class="stats-spacer"></div>
+                  <span class="status-pill" id="sweep-state" hidden>capturing…</span>
+                </div>
+              </div>
             </div>
           </div>
 

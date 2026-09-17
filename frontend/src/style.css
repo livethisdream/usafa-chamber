@@ -780,3 +780,28 @@ h1, h2, h3 { font-family: 'Outfit', 'Inter', sans-serif; }
   cursor: pointer;
 }
 .cal-log { height: 170px; flex: none; }
+
+/* --- VNA-only sweep -------------------------------------------------------
+   Two charts side by side: the Smith chart is square by nature, the magnitude
+   plot is not, so they get a fixed split rather than an even one. Below ~900px
+   they stack, because a Smith chart squeezed into half a phone is unreadable. */
+.sweep-body { display: flex; flex-direction: column; min-height: 0; }
+.sweep-charts {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 0.6rem;
+  min-height: 0;
+}
+.sweep-charts > .chart { min-width: 0; min-height: 0; }
+.sweep-readout {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+  flex-shrink: 0;
+}
+@media (max-width: 900px) {
+  .sweep-charts { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+}

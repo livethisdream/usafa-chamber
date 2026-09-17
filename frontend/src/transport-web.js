@@ -61,6 +61,9 @@ export function createWebTransport(callbacks = {}) {
                 case 'cal_started': callbacks.onCalStarted?.(data); break;
                 case 'cal_step':    callbacks.onCalStep?.(data); break;
                 case 'cal_done':    callbacks.onCalDone?.(data); break;
+                case 'sweep_started':callbacks.onSweepStarted?.(data); break;
+                case 'sweep_trace': callbacks.onSweepTrace?.(data); break;
+                case 'sweep_done':  callbacks.onSweepDone?.(data); break;
                 case 'log':         callbacks.onLog?.(data.level, data.source, data.message); break;
                 default:            callbacks.onMessage?.(data);
             }
@@ -100,6 +103,8 @@ export function createWebTransport(callbacks = {}) {
         acmProbe:    ()      => invoke('acm_probe'),
         startCal:    (p)     => invoke('start_cal', p),
         cancelCal:   ()      => invoke('cancel_cal'),
+        sweep:       (p)     => invoke('sweep', p),
+        cancelSweep: ()      => invoke('cancel_sweep'),
         get isConnected() { return !!ws && ws.readyState === WebSocket.OPEN; },
     };
 }

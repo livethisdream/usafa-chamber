@@ -25,6 +25,11 @@
 .PARAMETER Pos
     VISA resource for the positioner, e.g. ASRL4::INSTR. Default: auto-detect.
 
+.PARAMETER VnaOnly
+    Bring up the VNA alone. The positioner is neither looked for nor opened,
+    so a sweep works on a bench with no EMCenter attached; scans and jogs are
+    refused by the service rather than failing later.
+
 .PARAMETER NoPause
     Do not wait for a keypress when something fails. For scripts; the desktop
     shortcut wants the default so the window stays up long enough to read.
@@ -44,7 +49,8 @@ param(
     [switch]$NoBrowser,
     [string]$Vna = 'TCPIP0::127.0.0.1::5025::SOCKET',
     [string]$Pos,
-    [switch]$NoPause
+    [switch]$NoPause,
+    [switch]$VnaOnly
 )
 
 $ProjectRoot  = Split-Path -Parent $MyInvocation.MyCommand.Definition
@@ -174,31 +180,38 @@ try {
         # ------------------------------------------------------------------
         Write-Head 'Positioner (EMCenter)'
 
-        if (-not $Pos) {
-            # Windows renumbers COM ports per machine and per USB socket, so the
-            # number is not worth hardcoding. The USB identity is stable.
-            $emc = Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue |
-                   Where-Object { $_.Name -match 'EMCenter.*\(COM\d+\)' } |
-                   Select-Object -First 1
-            if (-not $emc) {
-                $chassis = Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue |
-                           Where-Object { $_.Name -match 'EMCenter' }
-                if ($chassis) {
-                    Write-Info 'The chassis is on USB but has no COM port: the driver is missing.'
-                    Write-Info 'Install the ETS-Lindgren EMCenter USB drivers (see SETUP_NEW_PC.md).'
-                } else {
-                    Write-Info 'The chassis is not on USB. Check it is powered and the cable is in.'
-                }
-                Invoke-Fail 'no EMCenter COM port found'
-            }
-            $null = $emc.Name -match '\(COM(\d+)\)'
-            $Pos = "ASRL$($Matches[1])::INSTR"
-            Write-Ok "$($emc.Name) -> $Pos"
+        if ($VnaOnly) {
+            Write-Warn 'skipped (-VnaOnly) - sweeps only, nothing turns the tower'
+            Write-Info 'The service refuses scans and jogs rather than failing later.'
+            $serviceArgs += @('--no-fallback', '--no-positioner', '--vna', $Vna)
         } else {
-            Write-Ok "using $Pos"
-        }
+            if (-not $Pos) {
+                # Windows renumbers COM ports per machine and per USB socket, so
+                # the number is not worth hardcoding. The USB identity is stable.
+                $emc = Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue |
+                       Where-Object { $_.Name -match 'EMCenter.*\(COM\d+\)' } |
+                       Select-Object -First 1
+                if (-not $emc) {
+                    $chassis = Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue |
+                               Where-Object { $_.Name -match 'EMCenter' }
+                    if ($chassis) {
+                        Write-Info 'The chassis is on USB but has no COM port: the driver is missing.'
+                        Write-Info 'Install the ETS-Lindgren EMCenter USB drivers (see SETUP_NEW_PC.md).'
+                    } else {
+                        Write-Info 'The chassis is not on USB. Check it is powered and the cable is in.'
+                    }
+                    Write-Info 'A VNA-only session does not need it: .\start.ps1 -VnaOnly'
+                    Invoke-Fail 'no EMCenter COM port found'
+                }
+                $null = $emc.Name -match '\(COM(\d+)\)'
+                $Pos = "ASRL$($Matches[1])::INSTR"
+                Write-Ok "$($emc.Name) -> $Pos"
+            } else {
+                Write-Ok "using $Pos"
+            }
 
-        $serviceArgs += @('--no-fallback', '--vna', $Vna, '--pos', $Pos)
+            $serviceArgs += @('--no-fallback', '--vna', $Vna, '--pos', $Pos)
+        }
     }
 
     # ----------------------------------------------------------------------

@@ -475,6 +475,67 @@ def check_cal_error_surfaced(r, outdir):
     return "instrument's reason reached the operator, naming the port"
 
 
+def s_sweep_nominal():
+    # A VNA-only capture: all four S-parameters at one position, no positioner
+    # involvement at all.
+    return {"_target": "sweep"}, []
+
+
+def check_sweep_nominal(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    sw = r["sweep"]
+    # Log frames are interleaved throughout; the shape that matters is the
+    # measurement frames in order.
+    seq = [t for t in sw["types"] if t != "log"]
+    assert seq[0] == "sweep_started", seq
+    assert seq[-1] == "sweep_done", seq
+    got = [t["parameter"] for t in sw["traces"]]
+    assert got == ["S11", "S21", "S12", "S22"], got
+    for t in sw["traces"]:
+        assert t["n_re"] == t["n_im"] == 11, t
+        assert t["complex"], (
+            f"{t['parameter']} arrived with an all-zero imaginary part - the "
+            f"phase was dropped, and a Smith chart cannot be drawn from "
+            f"magnitude")
+    assert sw["done"]["cancelled"] is False, sw["done"]
+    return f"captured {', '.join(got)} as complex pairs"
+
+
+def s_sweep_vs_scan():
+    return {"_target": "sweep"}, ["--while-scanning"]
+
+
+def check_sweep_vs_scan(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    msg = r["sweep"]["refused"].get("sweep_vs_scan")
+    assert msg, "a sweep started while a scan was running - both would program the VNA"
+    return f"refused while scanning: {msg}"
+
+
+def s_sweep_no_positioner():
+    # The bench rig: a VNA and nothing else. The capture must work and
+    # everything that turns the tower must refuse readably.
+    return {"_target": "sweep"}, ["--no-positioner"]
+
+
+def check_sweep_no_positioner(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    sw = r["sweep"]
+    assert len(sw["traces"]) == 4, (
+        f"a VNA-only rig could not complete a capture: {sw['types']}")
+    assert sw["state"]["has_positioner"] is False, sw["state"]
+    assert sw["state"]["connected"] is True, (
+        "a rig with no tower reported itself disconnected - the VNA was "
+        f"answering: {sw['state']}")
+    for name in ("seek", "jog", "zero"):
+        msg = sw["refused"].get(name, "")
+        assert msg, f"{name} was allowed with no positioner attached"
+        assert "AttributeError" not in msg, (
+            f"{name} failed on a None rather than refusing: {msg}")
+        assert "no positioner" in msg, f"{name} refused unreadably: {msg}"
+    return "captured without a tower; seek/jog/zero refused readably"
+
+
 def s_cal_cancelled():
     # Cancel before the first command goes out. This is the only place cancel
     # can act - a running AutoCal has nowhere to poll - and the point is that
@@ -561,6 +622,9 @@ SCENARIOS = [
     ("cal_no_apply", s_cal_no_apply, check_cal_no_apply),
     ("cal_error_surfaced", s_cal_error_surfaced, check_cal_error_surfaced),
     ("cal_cancelled", s_cal_cancelled, check_cal_cancelled),
+    ("sweep_nominal", s_sweep_nominal, check_sweep_nominal),
+    ("sweep_vs_scan", s_sweep_vs_scan, check_sweep_vs_scan),
+    ("sweep_no_positioner", s_sweep_no_positioner, check_sweep_no_positioner),
     ("cal_vs_scan", s_cal_refused_while_scanning, check_cal_refused_while_scanning),
     ("cal_mismatch", s_cal_sweep_mismatch, check_cal_sweep_mismatch),
 ]
@@ -600,6 +664,8 @@ def _child(faults_json: str, argv: list[str]) -> int:
     try:
         if target == "cal":
             rc = _run_cal(argv)
+        elif target == "sweep":
+            rc = _run_sweep(argv)
         elif target == "service":
             rc = _run_service(argv)
         else:
@@ -620,7 +686,88 @@ def _child(faults_json: str, argv: list[str]) -> int:
         "cals": state.cals,
         "cleared": state.collection_cleared,
         "cal": _CAL_RESULT.copy(),
+        "sweep": _SWEEP_RESULT.copy(),
     }), flush=True)
+    return 0
+
+
+_SWEEP_RESULT: dict = {}
+
+
+def _run_sweep(argv: list[str]) -> int:
+    """Drive the VNA-only sweep worker on the fake instruments.
+
+    Frames are captured rather than broadcast, the same way _run_cal does it,
+    because what this proves is in the payload: that all four parameters were
+    measured, that complex data survived to the client, and that the positioner
+    was never touched.
+    """
+    import asyncio
+    import warnings
+
+    import chamber_service as cs
+
+    warnings.filterwarnings("ignore", message=r"coroutine .* was never awaited")
+
+    no_pos = "--no-positioner" in argv
+    loop = asyncio.new_event_loop()
+    frames: list = []
+    try:
+        backend = cs.HardwareBackend("TCPIP0::127.0.0.1::5025::SOCKET",
+                                     "ASRL16::INSTR", 1, "A",
+                                     with_positioner=not no_pos)
+        svc = cs.ChamberService(backend, loop)
+        svc.push = frames.append
+
+        refused = {}
+        if "--while-scanning" in argv:
+            import threading
+            svc._worker = threading.Thread(target=lambda: time.sleep(2))
+            svc._worker.start()
+            try:
+                svc.cmd_sweep({})
+            except Exception as e:
+                refused["sweep_vs_scan"] = str(e)
+            svc._worker.join()
+
+        if no_pos:
+            # The tower is the thing that is absent; prove the refusals are
+            # readable rather than an AttributeError from a None.
+            for name, fn in (("seek", lambda: backend.seek(10.0)),
+                             ("jog", lambda: svc.cmd_jog({"deg": 10.0})),
+                             ("zero", lambda: svc.cmd_zero_here({}))):
+                try:
+                    fn()
+                    refused[name] = ""
+                except Exception as e:
+                    refused[name] = f"{type(e).__name__}: {e}"
+
+        svc._run_sweep(cs.SweepRequest(start_hz=1e9, stop_hz=2e9, points=11))
+
+        _SWEEP_RESULT.update({
+            "types": [f.get("type") for f in frames],
+            "traces": [{"parameter": f["parameter"],
+                        "n_re": len(f["re"]), "n_im": len(f["im"]),
+                        "complex": any(v != 0.0 for v in f["im"])}
+                       for f in frames if f.get("type") == "sweep_trace"],
+            # Summarised, not echoed: the frame carries the frequency grid as
+            # a numpy array, which the real push serialises with _json_default
+            # and this harness's plain json.dumps does not.
+            "started": {
+                "n_freqs": len(st["freqs"]),
+                "parameters": list(st["parameters"]),
+                "correction": st["correction"],
+            } if (st := next((f for f in frames
+                              if f.get("type") == "sweep_started"), None)) else None,
+            "done": next((f for f in frames
+                          if f.get("type") == "sweep_done"), None),
+            "refused": refused,
+            "state": {k: (float(v) if hasattr(v, "dtype") else v)
+                      for k, v in svc.get_state().items()},
+            "pos_reads": 0,
+        })
+    finally:
+        loop.close()
     return 0
 
 
@@ -778,6 +925,7 @@ def run_one(name: str, setup, check, verbose: bool) -> tuple[bool, str]:
              "cals": payload.get("cals", []),
              "cleared": payload.get("cleared", 0),
              "cal": payload.get("cal", {}),
+             "sweep": payload.get("sweep", {}),
              "stops": payload.get("stops", []),
              "seeks": payload.get("seeks", []),
              "sweeps": payload.get("sweeps", 0),
