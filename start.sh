@@ -5,7 +5,8 @@
 # Checks each piece in the order it is needed and stops with the reason when
 # one is missing, rather than letting the service fail with a Windows-shaped
 # hint. Ctrl+C stops the service and frontend together; S2VNA is left running,
-# since restarting it means turning its socket server back on.
+# so its calibration and state survive a restart of the service. When start.sh
+# launches S2VNA itself, it passes --socket-server on.
 #
 # Usage:
 #   ./start.sh                 # real rig
@@ -32,7 +33,7 @@ for arg in "$@"; do
     case "$arg" in
         --sim) SIM=1 ;;
         --no-browser) BROWSER=0 ;;
-        -h|--help) sed -n '2,17p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n '2,18p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "unknown option: $arg" >&2; exit 2 ;;
     esac
 done
@@ -115,6 +116,8 @@ else
     if ! listening "$vna_port"; then
         if pgrep -x cmtvna >/dev/null; then
             warn "S2VNA is running but nothing is listening on $vna_port"
+            info 'Turn its socket server on: System -> Misc Setup -> Network Setup -> Socket Server -> On'
+            info '(or close S2VNA and rerun; start.sh launches it with the server on)'
         else
             s2vna="${S2VNA:-}"
             if [ -z "$s2vna" ]; then
@@ -127,12 +130,12 @@ else
                 info 'Start it by hand, or point at it: S2VNA=/path/to/cmtvna ./start.sh'
                 exit 1
             fi
-            info "launching $s2vna"
+            info "launching $s2vna with its socket server on"
             # Detached, so it outlives this script and Ctrl+C.
-            (cd "$(dirname "$s2vna")" && setsid ./cmtvna >"$LOG_DIR/s2vna.log" 2>&1 </dev/null &)
+            (cd "$(dirname "$s2vna")" && setsid ./cmtvna --socket-server on --socket-port "$vna_port" \
+                >"$LOG_DIR/s2vna.log" 2>&1 </dev/null &)
         fi
-        info "waiting for port $vna_port. If S2VNA is open, turn its socket server on:"
-        info '  System -> Misc Setup -> Network Setup -> Socket Server -> On'
+        info "waiting for port $vna_port"
         until listening "$vna_port"; do sleep 1; done
     fi
     ok "listening on $vna_port"
