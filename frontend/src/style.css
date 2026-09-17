@@ -73,8 +73,6 @@ body {
 h1, h2, h3 { font-family: 'Outfit', 'Inter', sans-serif; }
 
 .app-container {
-  max-width: 1600px;
-  margin: 0 auto;
   padding: 0.65rem;
   display: flex;
   flex-direction: column;
