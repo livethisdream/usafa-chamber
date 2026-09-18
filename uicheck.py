@@ -126,7 +126,10 @@ def main(argv=None) -> int:
 
             page.goto(f"http://127.0.0.1:{a.http_port}/", wait_until="networkidle")
             page.wait_for_timeout(1500)
-            check("connects to service", page.inner_text("#mode-badge") == "SIMULATED",
+            # Case-insensitive: the status strip renders this lowercase now, and
+            # the badge's styling is not what this check is about.
+            check("connects to service",
+                  page.inner_text("#mode-badge").strip().upper() == "SIMULATED",
                   page.inner_text("#vna-idn"))
 
             # Correction state, in sim. There is no calibration behind a
@@ -260,6 +263,41 @@ def main(argv=None) -> int:
             page.wait_for_timeout(700)
             check("lists stored runs", page.locator(".run-row").count() > 0,
                   f"{page.locator('.run-row').count()} run(s)")
+
+            # VNA-only sweep, and the Smith chart it feeds.
+            #
+            # The assertion that matters is that the locus stays inside the
+            # chart. Plotly's Smith trace is drawn on the impedance plane -
+            # `real` is resistance, `imag` reactance - so handing it the
+            # reflection coefficient renders something that looks right until
+            # you notice the match is missing: every point whose real part is
+            # negative lands outside r = 0 and is silently clipped, and near
+            # resonance that is exactly what Gamma's real part does. A passive
+            # load has r >= 0, so a negative one here means Gamma reached the
+            # trace unconverted. A screenshot does not catch this; this does.
+            page.click(".tab-btn:has-text('Sweep')")
+            page.wait_for_timeout(400)
+            page.select_option("#sweep-params", "S11")
+            page.click("#btn-sweep")
+            for _ in range(60):
+                if page.inner_text("#sw-freq") not in ("", "—"):
+                    break
+                page.wait_for_timeout(250)
+            check("sweep captures with the tower parked",
+                  page.inner_text("#sw-freq") not in ("", "—"),
+                  f"Z {page.inner_text('#sw-z')}, VSWR {page.inner_text('#sw-vswr')}")
+
+            locus = page.evaluate(
+                "() => { const t = document.getElementById('chart-smith').data[0];"
+                " const r = t.real.filter(Number.isFinite);"
+                " return { n: t.real.length, finite: r.length,"
+                " minReal: r.length ? Math.min(...r) : null }; }")
+            check("smith locus stays inside the chart",
+                  locus["n"] > 0 and locus["finite"] > 0
+                  and locus["minReal"] >= 0,
+                  f"{locus['finite']}/{locus['n']} finite, "
+                  f"min r = {locus['minReal']}")
+            page.screenshot(path=str(a.shots / "tab-sweep.png"))
 
             for tab, probe in (("VNA", "#chart-rect"),
                                ("Turntable", "#dial"),
