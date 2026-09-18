@@ -246,6 +246,11 @@ Windows).
       actually answers. Then mate the module and try one real 2-port AutoCal. The
       rest of the calibration feature is already built and tested against fakes;
       this is the only step that needs the rig.
+      - [ ] `SOLT1` now ships too: the dashboard runs a 1-port cal when the
+            parameter is S11 or S22. SOLT2 is the verified one (2026-09-15);
+            SOLT1 has never been sent to the instrument. Try it in the same
+            session, on one port, and correct `AcmCmds.solt1` from what
+            answers.
 - [ ] Chase the FTDI link corruption physically — different cable, no hub, check
       routing relative to the VNA and chamber feed. `bringup.py` stage 4 now
       measures the error rate over N raw position reads, so each change is a

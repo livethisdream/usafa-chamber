@@ -100,15 +100,24 @@ class CalRequest:
     if_bw_hz: float = 1.0e3
     power_dbm: float = 0.0
     parameter: str = "S21"
-    ports: tuple[int, int] = (1, 2)
+    # Empty means "whatever the parameter needs", resolved in __post_init__.
+    # Measuring S11 only needs port 1 corrected, and a 2-port cal for it costs
+    # the operator a second trip into the chamber to mate the module across
+    # both cable ends for a thru standard the measurement never uses.
+    ports: tuple[int, ...] = ()
     orient: bool = False
     reference_plane: str = ""
+
+    def __post_init__(self) -> None:
+        # Resolved here rather than in from_args so a directly constructed
+        # request - rigcheck, a script, a future CLI - cannot end up with no
+        # ports at all.
+        self.ports = (tuple(int(p) for p in self.ports)[:2]
+                      if self.ports else pm.ports_for(self.parameter))
 
     @classmethod
     def from_args(cls, a: dict) -> "CalRequest":
         f = {k: a[k] for k in cls.__dataclass_fields__ if k in a}
-        if "ports" in f:
-            f["ports"] = tuple(int(p) for p in f["ports"])[:2]
         return cls(**f)
 
     def sweep(self) -> dict:
@@ -121,17 +130,23 @@ class CalRequest:
 
 
 # Fields whose disagreement between a calibration and a run matters. Power is
-# in the list because the A2202-Fx corrects per source level; parameter is not,
-# because a 2-port cal corrects every parameter it collected.
+# in the list because the A2202-Fx corrects per source level. The parameter is
+# not compared by name - what matters is whether the calibration covered the
+# ports the parameter needs, which is checked separately below.
 CAL_SWEEP_KEYS = ("start_hz", "stop_hz", "points", "if_bw_hz", "power_dbm")
 
 
 def cal_mismatch(record: dict | None, req) -> list[str]:
-    """Which sweep settings a run does not share with the calibration.
+    """What a run does not share with the calibration: its sweep, and its ports.
 
     Empty when they agree, or when there is no calibration to disagree with -
     "uncalibrated" is already reported by correction_state and does not need
     saying twice in different words.
+
+    Ports matter as soon as 1-port calibrations exist. A 2-port cal covers
+    every parameter it collected, so it never trips this; a SOLT1 at port 1
+    corrects S11 and says nothing whatsoever about S21, and a run that took the
+    second for the first would be wrong in a way no plot reveals.
     """
     if not record:
         return []
@@ -143,6 +158,17 @@ def cal_mismatch(record: dict | None, req) -> list[str]:
             continue
         if abs(float(have) - float(want)) > 1e-6:
             out.append(f"{k} {have:g} -> {want:g}")
+
+    # Absent on records written before calibrations could be anything but
+    # 2-port. Unknown coverage is not a disagreement, the same way a missing
+    # sweep key is not - it is silence, and correction_state speaks to that.
+    covered = record.get("ports")
+    param = getattr(req, "parameter", None)
+    if covered and param:
+        missing = [p for p in pm.ports_for(param) if p not in covered]
+        if missing:
+            out.append(f"{param.upper()} needs {pm.ports_phrase(tuple(missing))}"
+                       f", not calibrated ({pm.ports_phrase(tuple(covered))} only)")
     return out
 
 
@@ -223,9 +249,11 @@ class SimBackend:
         immediately break. What this is for is the UI: the modal, the steps,
         the cancel button and the record all get exercised away from the rig.
         """
-        for step in ("orienting the module to the ports",
-                     f"2-port AutoCal on ports {req.ports[0]} and {req.ports[1]}",
-                     "applying"):
+        steps = [f"{len(req.ports)}-port AutoCal on "
+                 f"{pm.ports_phrase(req.ports)}", "applying"]
+        if len(req.ports) == 2:
+            steps.insert(0, "orienting the module to the ports")
+        for step in steps:
             if should_stop is not None and should_stop():
                 raise pm.Aborted("calibration stopped after the previous step")
             if on_step:
@@ -377,7 +405,7 @@ class HardwareBackend:
 
     def calibrate(self, req: "CalRequest", on_step=None,
                   should_stop=None) -> str:
-        """Configure the sweep, then run a 2-port AutoCal at it.
+        """Configure the sweep, then run an AutoCal at it over req.ports.
 
         Configure first, deliberately: setting the sweep is what invalidates a
         calibration, so doing it afterwards would throw away what was just
@@ -622,8 +650,9 @@ class ChamberService:
                    "ports": list(req.ports),
                    "reference_plane": req.reference_plane,
                    "mode": self.backend.mode})
-        self.log("info", "cal", f"AutoCal on ports {req.ports[0]} and "
-                                f"{req.ports[1]}, {req.points} pts, "
+        self.log("info", "cal", f"{len(req.ports)}-port AutoCal on "
+                                f"{pm.ports_phrase(req.ports)} "
+                                f"for {req.parameter}, {req.points} pts, "
                                 f"{req.start_hz/1e9:.3f}-{req.stop_hz/1e9:.3f} GHz")
 
         def step(msg: str) -> None:
@@ -644,8 +673,12 @@ class ChamberService:
 
             record = {"taken_at": started,
                       "finished": time.strftime("%Y-%m-%d %H:%M:%S"),
-                      "method": "ecal_solt2",
+                      "method": f"ecal_solt{len(req.ports)}",
                       "ports": list(req.ports),
+                      # The parameter this was taken for. The ports are what
+                      # cal_mismatch actually checks; this records the intent
+                      # that chose them, which the ports alone do not say.
+                      "parameter": req.parameter,
                       "reference_plane": req.reference_plane,
                       "module": module,
                       "mode": self.backend.mode,

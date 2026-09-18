@@ -354,6 +354,28 @@ def main(argv=None) -> int:
                   "start disabled until the module is acknowledged")
             page.screenshot(path=str(a.shots / "cal-setup.png"))
 
+            # The parameter decides how many ports the cal covers, and the modal
+            # has to say which - a 2-port label over a 1-port procedure sends
+            # somebody into the chamber to mate a thru nothing will collect.
+            check("cal modal says 2-port for S21",
+                  "2-port" in page.inner_text("#cal-title")
+                  and "across those two ends" in page.inner_text("#cal-step-mate"),
+                  page.inner_text("#cal-title"))
+            page.click("#cal-close")
+            open_section(page, "VNA")
+            page.select_option("#f-param", "S11")
+            page.click("#btn-cal")
+            page.wait_for_timeout(400)
+            check("cal modal says 1-port for S11",
+                  "1-port" in page.inner_text("#cal-title")
+                  and "port 1" in page.inner_text("#cal-title")
+                  and "port 1" in page.inner_text("#cal-step-unmate"),
+                  page.inner_text("#cal-title"))
+            page.screenshot(path=str(a.shots / "cal-1port.png"))
+            page.click("#cal-close")
+            page.select_option("#f-param", "S21")
+            page.click("#btn-cal")
+            page.wait_for_timeout(400)
             page.check("#cal-ack")
             page.wait_for_timeout(200)
             check("acknowledgement enables start", page.is_enabled("#cal-go"))
@@ -376,6 +398,19 @@ def main(argv=None) -> int:
             check("cal record lands in the panel",
                   page.inner_text("#cal-summary") != "none recorded",
                   page.inner_text("#cal-summary"))
+            check("panel records the port count",
+                  "2-port" in page.inner_text("#cal-summary"),
+                  page.inner_text("#cal-summary"))
+
+            # A 2-port calibration covers every parameter it collected, so
+            # retuning to S11 must not raise a coverage warning. The inverse
+            # case - a 1-port cal against S21 - is rigcheck's cal_ports_vs_param.
+            page.select_option("#f-param", "S11")
+            page.wait_for_timeout(300)
+            check("2-port cal covers a reflection term",
+                  "covers" not in page.inner_text("#cal-drift"),
+                  page.inner_text("#cal-drift")[:60])
+            page.select_option("#f-param", "S21")
 
             page.fill("#f-start", "5")
             page.dispatch_event("#f-start", "input")

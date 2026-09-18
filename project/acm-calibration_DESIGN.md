@@ -192,6 +192,11 @@ way; the automation is the convenience.
       ends inside the chamber, or the instrument front panel? (Almost certainly
       the former, but it should be written down once rather than assumed.)
 - [ ] Does the ACM2202 need `ORI:EXEC` first, or does `SOLT2` orient itself?
+- [ ] Does `SOLT1 <p>` work on one port with the module mated to a single cable
+      end? The dashboard now issues it for S11 and S22 — a reflection term needs
+      only its own port corrected, and asking the operator for a 2-port cal to
+      measure S11 costs a thru standard nothing will use. Unverified; SOLT2 is
+      the one that has actually run.
 - [ ] How long does a 2-port cal take at the sweep settings actually used? That
       number sets the VISA timeout and the progress estimate.
 - [ ] Is a confidence check worth wiring, or is it a bench-only nicety?

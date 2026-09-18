@@ -113,9 +113,12 @@ class AcmCmds:
     and having them in one dataclass made that a ten-minute correction rather
     than a rewrite.
     """
-    # Full 2-port SOLT via the module. The one the chamber actually wants: a
+    # Full 2-port SOLT via the module. What a pattern run wants: a
     # transmission measurement needs both ports corrected.
     solt2: str = "SENS{ch}:CORR:COLL:ECAL:SOLT2 {p1:d},{p2:d}"
+    # One port, for a reflection term. Sends a different header than solt2
+    # rather than a narrower argument list, and like every mnemonic here it is
+    # unverified against the instrument until bring-up stage 7 says otherwise.
     solt1: str = "SENS{ch}:CORR:COLL:ECAL:SOLT1 {p1:d}"
     # Orientation: which module port is on which VNA port. May be implicit in
     # SOLT2 on modules that auto-orient; issued only when `orient` is asked for.
@@ -402,10 +405,15 @@ class Vna:
         except pyvisa.VisaIOError:
             pass
 
-    def acm_calibrate(self, ports: tuple[int, int] | None = None,
+    def acm_calibrate(self, ports: "tuple[int, ...] | None" = None,
                       orient: bool = False,
                       on_step: "Callable[[str], None] | None" = None) -> str:
-        """Run a 2-port AutoCal and return the resulting correction state.
+        """Run an AutoCal over `ports` and return the resulting correction state.
+
+        One port collects SOLT1, two collect SOLT2. That is not a shortcut: a
+        reflection term needs only its own port corrected, and asking for a
+        2-port cal to measure S11 means mating the module across both cable ends
+        for a thru standard nothing will use.
 
         Blocks for the whole procedure. There is no progress to poll and no
         point to cancel at: the module runs short/open/load/thru inside one SCPI
@@ -419,17 +427,26 @@ class Vna:
         turning tower.
         """
         a = self.acm
-        p1, p2 = ports or (a.port1, a.port2)
+        ports = tuple(ports or (a.port1, a.port2))
+        if len(ports) not in (1, 2):
+            raise ValueError(f"an AutoCal covers one or two ports, got {ports}")
         saved, self.io.timeout = self.io.timeout, a.timeout_ms
         try:
-            if orient:
+            # Orientation maps the module's ports onto the VNA's, which only
+            # means anything when there are two of them to get the wrong way
+            # round. Skipped for a 1-port cal rather than sent and ignored.
+            if orient and len(ports) == 2:
                 if on_step:
                     on_step("orienting the module to the ports")
                 self.io.write(a.orient.format(ch=self.ch))
                 self.io.query("*OPC?")
             if on_step:
-                on_step(f"2-port AutoCal on ports {p1} and {p2}")
-            self.io.write(a.solt2.format(ch=self.ch, p1=p1, p2=p2))
+                on_step(f"{len(ports)}-port AutoCal on {ports_phrase(ports)}")
+            if len(ports) == 1:
+                self.io.write(a.solt1.format(ch=self.ch, p1=ports[0]))
+            else:
+                self.io.write(a.solt2.format(ch=self.ch,
+                                             p1=ports[0], p2=ports[1]))
             self.io.query("*OPC?")
         except BaseException:
             self.acm_clear()
@@ -681,6 +698,35 @@ class Positioner:
             self.io.close()
         except Exception:
             pass
+
+
+def ports_for(parameter: str | None) -> tuple[int, ...]:
+    """Which VNA ports a parameter needs corrected.
+
+    S11 is a port-1 reflection and S22 a port-2 one, so each needs only its own
+    port. A transmission term needs both, because the correction has to account
+    for what leaves one port and what arrives at the other - which is also why
+    it is the pairing, not the parameter name, that decides whether a stored
+    calibration still covers a run.
+
+    Anything unrecognized gets both. Guessing narrow would quietly hand back a
+    calibration that does not cover the measurement.
+    """
+    p = (parameter or "").strip().upper()
+    if p == "S11":
+        return (1,)
+    if p == "S22":
+        return (2,)
+    return (1, 2)
+
+
+def ports_phrase(ports: "tuple[int, ...]") -> str:
+    """'port 1' / 'ports 1 and 2'. One place, so the log, the UI and the
+    instrument step all say it the same way."""
+    p = [str(int(x)) for x in ports]
+    if len(p) == 1:
+        return f"port {p[0]}"
+    return "ports " + " and ".join(p)
 
 
 def correction_is_on(state: str | None) -> bool | None:

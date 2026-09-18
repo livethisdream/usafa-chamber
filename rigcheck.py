@@ -460,6 +460,51 @@ def check_cal_sweep_mismatch(r, outdir):
     return f"{len(drift)} setting(s) flagged and written into meta.json"
 
 
+def s_cal_one_port():
+    # S11 needs port 1 corrected and nothing else. The assertion is on the
+    # command that reached the instrument, because "1-port" being true of the
+    # label and false of the SCPI is exactly the failure worth catching.
+    return {"_target": "cal"}, ["--param", "S11"]
+
+
+def check_cal_one_port(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    done = r["cal"].get("done") or {}
+    assert done.get("ok"), f"cal did not succeed: {done}"
+    rec = r["cal"].get("record") or {}
+    assert rec.get("ports") == [1], f"ports recorded as {rec.get('ports')}"
+    assert rec.get("method") == "ecal_solt1", f"method {rec.get('method')!r}"
+
+    solt = [c for c in r["cals"] if "SOLT" in c.upper()]
+    assert solt, f"no SOLT command was issued at all: {r['cals']}"
+    assert all("SOLT1" in c.upper() for c in solt), (
+        f"a 1-port calibration issued {solt} - SOLT2 mates the module across "
+        f"both cable ends to collect a thru that S11 never uses")
+    # Orientation maps module ports onto VNA ports, which is meaningless with
+    # one of them; sending it anyway would be a command nobody can justify.
+    assert not any("ORI" in c.upper() for c in r["cals"]), (
+        f"1-port cal tried to orient the module: {r['cals']}")
+    return f"S11 collected {solt[0].split()[0].split(':')[-1]} on port 1"
+
+
+def s_cal_ports_vs_param():
+    # The other half: a 1-port calibration must not be quietly accepted as
+    # cover for a transmission run. Nothing in a plot would reveal it.
+    return {"_target": "cal"}, ["--param", "S11", "--then-scan-s21"]
+
+
+def check_cal_ports_vs_param(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    drift = r["cal"].get("scan_mismatch")
+    assert drift, "an S21 run against a port-1 calibration reported no mismatch"
+    assert any("port" in d for d in drift), (
+        f"the mismatch never mentions ports: {drift}")
+    assert any("does not match the calibration" in w
+               for w in r["cal"].get("warnings", [])), (
+        "the port gap was never said out loud")
+    return f"S21 against a port-1 cal flagged: {drift[-1]}"
+
+
 def pm_on(state):
     import pattern_measure
     return pattern_measure.correction_is_on(state)
@@ -494,6 +539,8 @@ SCENARIOS = [
     ("cal_cancelled", s_cal_cancelled, check_cal_cancelled),
     ("cal_vs_scan", s_cal_refused_while_scanning, check_cal_refused_while_scanning),
     ("cal_mismatch", s_cal_sweep_mismatch, check_cal_sweep_mismatch),
+    ("cal_one_port", s_cal_one_port, check_cal_one_port),
+    ("cal_ports_vs_param", s_cal_ports_vs_param, check_cal_ports_vs_param),
 ]
 
 
@@ -606,7 +653,10 @@ def _run_cal(argv: list[str]) -> int:
             finally:
                 stop2.set()
         else:
-            svc._run_cal(cs.CalRequest(reference_plane="rigcheck"))
+            param = (argv[argv.index("--param") + 1]
+                     if "--param" in argv else "S21")
+            svc._run_cal(cs.CalRequest(reference_plane="rigcheck",
+                                       parameter=param))
 
         done = [f for f in frames if f.get("type") == "cal_done"]
         _CAL_RESULT.update({
@@ -615,6 +665,20 @@ def _run_cal(argv: list[str]) -> int:
             "record": svc.calibration,
             "saved": (cs.RUNS_DIR / cs.CAL_NAME).is_file(),
         })
+
+        if "--then-scan-s21" in argv:
+            # Same sweep as the calibration, so nothing but the port coverage
+            # can be what trips: an S21 run against a cal that saw only port 1.
+            frames.clear()
+            svc._run_scan(cs.ScanRequest(start_deg=0.0, stop_deg=90.0,
+                                         step_deg=90.0, points=21,
+                                         parameter="S21", name=outdir.name))
+            started = [f for f in frames if f.get("type") == "scan_started"]
+            _CAL_RESULT["scan_mismatch"] = (started[0].get("cal_mismatch")
+                                            if started else None)
+            _CAL_RESULT["warnings"] = [f["message"] for f in frames
+                                       if f.get("type") == "log"
+                                       and f.get("level") == "warn"]
 
         if "--then-scan" in argv:
             # A run taken at a different sweep than the calibration has to say

@@ -607,6 +607,38 @@ function calParams() {
     };
 }
 
+/**
+ * Which VNA ports a parameter needs corrected. Mirrors pm.ports_for().
+ *
+ * S11 is a port-1 reflection and S22 a port-2 one; a transmission term needs
+ * both. Anything unrecognized gets both, because guessing narrow would offer a
+ * 1-port calibration for a measurement that needs two.
+ */
+function portsFor(parameter) {
+    const p = (parameter || '').trim().toUpperCase();
+    if (p === 'S11') return [1];
+    if (p === 'S22') return [2];
+    return [1, 2];
+}
+
+/** 'port 1' / 'ports 1 and 2'. Mirrors pm.ports_phrase(). */
+function portsPhrase(ports) {
+    return ports.length === 1 ? `port ${ports[0]}` : `ports ${ports.join(' and ')}`;
+}
+
+/** Whether a stored calibration covers the parameter now set. A 2-port cal
+ *  covers everything; a 1-port one says nothing about the other port. Mirrors
+ *  the port half of cal_mismatch(). */
+function calPortGap(record) {
+    const covered = record?.ports;
+    if (!covered?.length) return null;             // pre-ports record: unknown
+    const want = $('f-param').value;
+    const missing = portsFor(want).filter((p) => !covered.includes(p));
+    if (!missing.length) return null;
+    return `This calibration covers ${portsPhrase(covered)} only, and ${want} `
+         + `needs ${portsPhrase(missing)}. Recalibrate before measuring it.`;
+}
+
 /** Which sweep settings a prospective run does not share with the cal. Mirrors
  *  cal_mismatch() in the service, so the panel says the same thing the run's
  *  meta.json will. */
@@ -640,11 +672,19 @@ function renderCalibration() {
     }
     const span = `${(rec.sweep.start_hz / 1e9).toFixed(3)}–`
                + `${(rec.sweep.stop_hz / 1e9).toFixed(3)} GHz`;
-    summary.textContent = `${calAgeText(rec)}, ${span}`
+    const ports = rec.ports?.length ? `${rec.ports.length}-port, ` : '';
+    summary.textContent = `${calAgeText(rec)}, ${ports}${span}`
         + (rec.mode === 'sim' ? ' (simulated)' : '');
 
+    // Port coverage first. A sweep that drifted is corrected by interpolation
+    // at best; a parameter the calibration never touched is not corrected at
+    // all, so it is the more serious of the two and says so on its own terms.
+    const gap = calPortGap(rec);
     const drift = calDrift(rec);
-    if (drift.length) {
+    if (gap) {
+        warn.hidden = false;
+        warn.textContent = gap;
+    } else if (drift.length) {
         warn.hidden = false;
         warn.textContent = `The sweep set above differs from the calibration `
             + `(${drift.join(', ')}). A run taken this way is corrected by `
@@ -676,6 +716,28 @@ function openCalModal() {
                               + `${(p.stop_hz / 1e9).toFixed(3)} GHz`;
     $('cal-pts').textContent = `${p.points} pts / ${p.if_bw_hz} Hz`;
     $('cal-pow').textContent = `${p.power_dbm} dBm`;
+
+    // How many ports this cal will cover, and therefore what the operator has
+    // to go and connect. The service derives the same thing from the same
+    // parameter; saying "2-port" over a 1-port procedure would send somebody
+    // into the chamber to mate a thru that nothing is going to collect.
+    const ports = portsFor(p.parameter);
+    const one = ports.length === 1;
+    $('cal-title').textContent =
+        `Calibrate — ${ports.length}-port AutoCal, ${p.parameter} `
+        + `(${portsPhrase(ports)})`;
+    // Named by port number rather than by which antenna is on it: this code
+    // does not know the chamber's wiring, and a checklist that guessed would
+    // be worse than one that points at the connector.
+    $('cal-step-unmate').textContent = one
+        ? `Unmate whatever is on VNA port ${ports[0]} from its cable end.`
+        : 'Unmate the transmit horn and the AUT from the cable ends.';
+    $('cal-step-mate').textContent = one
+        ? 'Mate the ACM2202 to that end.'
+        : 'Mate the ACM2202 across those two ends.';
+    $('cal-step-remate').textContent = one
+        ? `Re-mate what was on port ${ports[0]}.`
+        : 'Re-mate the transmit horn and the AUT.';
     $('cal-ack').checked = false;
     $('cal-go').disabled = true;
     $('cal-log').innerHTML = '';
@@ -796,7 +858,7 @@ const transport = createTransport({
         state.calibrating = true;
         calStage('run');
         $('cal-status').textContent = 'Calibrating…';
-        calLog(`ports ${m.ports.join(' and ')}, plane: ${m.reference_plane || '—'}`);
+        calLog(`${portsPhrase(m.ports)}, plane: ${m.reference_plane || '—'}`);
         syncControls();
     },
     onCalStep: (m) => calLog(m.message),
@@ -1143,6 +1205,10 @@ function wire() {
     // form until data arrives and the data's own parameter takes over.
     $('f-param').addEventListener('change', () => {
         if (!state.lastTrace) { state.parameter = null; syncFormats(); }
+        // The parameter now also decides how many ports a calibration covers,
+        // so the coverage warning has to follow it the way the drift warning
+        // follows the sweep fields.
+        renderCalibration();
     });
 
     $('btn-stop').addEventListener('click', () => guard(() => transport.stop()));

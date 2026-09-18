@@ -77,6 +77,27 @@ exactly as a scan does — more importantly, in fact, since a pattern is
 normalized to its own peak and survives an uncalibrated run, while an impedance
 locus does not.
 
+### Calibration follows the parameter
+
+The parameter also decides how many ports a calibration covers. S11 needs port 1
+corrected and S22 needs port 2; a transmission term needs both. So the dashboard
+runs a **1-port AutoCal (SOLT1)** for a reflection parameter and a **2-port one
+(SOLT2)** otherwise, and the modal says which — a 2-port label over a 1-port
+procedure sends somebody into the chamber to mate the module across both cable
+ends for a thru standard the measurement never uses.
+
+The stored record carries the ports it covered, and a run is checked against
+them rather than against a parameter name: a 2-port cal covers everything it
+collected, while a SOLT1 at port 1 corrects S11 and says nothing whatsoever
+about S21. Taking the second for the first is wrong in a way no plot reveals, so
+it is flagged in the panel, in the log and in the run's `meta.json`. Records
+written before this distinction existed carry no ports and are left alone —
+unknown coverage is silence, not agreement.
+
+**SOLT2 is verified against the instrument; SOLT1 is not.** Like the rest of the
+ACM path it is written from the programming manual and waits on `bringup.py`
+stage 7.
+
 ### Checking the drivers
 
 `rigcheck.py` runs the acquisition drivers against fake instruments that
