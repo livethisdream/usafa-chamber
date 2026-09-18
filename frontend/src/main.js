@@ -1020,21 +1020,34 @@ function db(re, im) {
 }
 
 /**
- * Load impedance behind a reflection coefficient: Z = Z0 (1 + G) / (1 - G).
+ * Normalized load impedance behind a reflection coefficient: z = (1+G)/(1-G).
  *
- * A short is G = -1, where the denominator is zero and Z is genuinely zero, so
- * the singular case is real rather than a rounding artefact and is reported as
- * such instead of as Infinity.
+ * This, not G, is what a Smith chart is drawn in: the horizontal axis is
+ * resistance running 0 at the left to infinity at the right, and the arcs are
+ * reactance - both normalized to Z0. Plotly's `scattersmith` takes exactly
+ * that in its `real` and `imag`.
+ *
+ * An open is G = +1, where the denominator vanishes and z is genuinely
+ * infinite, so the singular case is real rather than a rounding artefact.
  */
-function gammaToZ(re, im) {
+function gammaToZNorm(re, im) {
     const dr = 1 - re, di = -im;
     const den = dr * dr + di * di;
     if (den < 1e-18) return { r: Infinity, x: Infinity };
     const nr = 1 + re, ni = im;
     return {
-        r: Z0 * (nr * dr + ni * di) / den,
-        x: Z0 * (ni * dr - nr * di) / den,
+        r: (nr * dr + ni * di) / den,
+        x: (ni * dr - nr * di) / den,
     };
+}
+
+/**
+ * The same thing in ohms, for the readout. A short is G = -1, where z is zero
+ * rather than singular.
+ */
+function gammaToZ(re, im) {
+    const z = gammaToZNorm(re, im);
+    return Number.isFinite(z.r) ? { r: Z0 * z.r, x: Z0 * z.x } : z;
 }
 
 function fmtOhms(z) {
@@ -1071,14 +1084,22 @@ function redrawSweep() {
         }),
     }, {}, SWEEP_PARAMS.map((_, i) => i));
 
-    // Smith: reflection parameters plus the marker point.
+    // Smith: reflection parameters plus the marker point, as normalized
+    // impedance. Handing the trace G directly renders something that looks
+    // like a Smith chart right until you notice the match is missing: G's real
+    // part goes negative through resonance, which lands outside r = 0 and is
+    // silently clipped - deleting exactly the part of the locus worth seeing.
     const i = state.sweepMarker;
     const primary = state.sweepData.S11 || state.sweepData.S22;
+    const locus = (name) => {
+        const d = state.sweepData[name];
+        return d ? d.re.map((re, k) => gammaToZNorm(re, d.im[k])) : [];
+    };
+    const marker = primary ? [gammaToZNorm(primary.re[i], primary.im[i])] : [];
+    const traces = REFLECTION.map(locus).concat([marker]);
     Plotly.update('chart-smith', {
-        real: REFLECTION.map((n) => (state.sweepData[n] || { re: [] }).re)
-            .concat([primary ? [primary.re[i]] : []]),
-        imag: REFLECTION.map((n) => (state.sweepData[n] || { im: [] }).im)
-            .concat([primary ? [primary.im[i]] : []]),
+        real: traces.map((z) => z.map((p) => p.r)),
+        imag: traces.map((z) => z.map((p) => p.x)),
     }, {}, [0, 1, 2]);
 
     renderSweepReadout();
