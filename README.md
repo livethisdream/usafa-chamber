@@ -151,7 +151,10 @@ The chrome follows [`livethisdream/phaser`](https://github.com/livethisdream/pha
   icon expands straight back into that section.
 - **Tabs over the plots**: Pattern Measurement, VNA, Turntable, Logs. Inactive
   panes are hidden with `visibility`, not `display`, so a chart keeps its size and
-  comes back drawn rather than the wrong shape.
+  comes back drawn rather than the wrong shape. The Pattern tab holds two views of
+  the same cut — polar for shape and pointing, rectangular for reading sidelobe
+  levels and null depths off an axis — and the **View** picker chooses between
+  them. Both are drawn at all times, for the same reason the panes are.
 - **Theme at the foot of the sidebar**, cycling system → light → dark. System is
   the default and stays live: flipping the OS theme with the page open moves the
   page with it, until someone picks a side.
@@ -200,7 +203,25 @@ amber, with an RMS deviation in the footer. It reads this project's own
 `pattern.csv` and, failing that, any CSV carrying an angle column and a dB column,
 which covers most solver exports. Both traces are normalized to their own peak, so
 a model in dBi and a measurement in raw S21 dB are still comparable; **Rotate**
-takes out a known mount offset.
+takes out a known mount offset. **Overlay on** says which of the two pattern views
+the reference is drawn on — both, by default.
+
+**Which cut the import means.** A solver asked for a pattern usually returns every
+cut it computed in one file, discriminated by a held angle: an azimuth cut is
+theta pinned at 90 while phi sweeps, an elevation cut is the other way round. Two
+things follow, and the importer does both.
+
+The swept axis is decided from the rows, not from the header order. Whichever
+angular column actually moves is the sweep; reading `Theta, Phi, dB` left to right
+would take theta as the angle and collapse a whole azimuth cut onto one point.
+Every angular column that is *not* the sweep then names the plane, as does any
+column that says so outright (`plane`, `cut`), and the file is split on it — so a
+**Cut plane** picker appears beside Parameter and Frequency whenever there is more
+than one to pick, and the log says which plane the comparison landed on. This
+matters because the wrong answer here is not a visibly wrong answer: differencing
+a measured azimuth cut against a modelled elevation cut still produces an RMS in
+dB, and it is about nothing. A file with a single cut is unchanged — no picker,
+nothing to choose.
 
 The comparison is clamped 30 dB below peak before differencing, which matters more
 than it sounds. Nulls are where a model and a measurement disagree most and where
@@ -212,6 +233,9 @@ Parsing happens in the browser (`frontend/src/reference.js`); nothing is uploade
 and the service never learns a comparison is running. `uicheck.py` re-imports a
 finished run's own `pattern.csv` and asserts the deviation comes back at 0.00 dB,
 which is a round trip through the writer, the parser, and the comparator at once.
+It then imports a two-plane solver export and asserts that both planes are
+offered, that the axis that moves was the one swept, and that changing the plane
+changes the number.
 
 ## Which computer runs this
 

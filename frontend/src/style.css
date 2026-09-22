@@ -592,6 +592,12 @@ h1, h2, h3 { font-family: 'Outfit', 'Inter', sans-serif; }
 .pane-body canvas { width: 100%; height: 100%; display: block; }
 .chart { width: 100%; height: 100%; }
 
+/* Two views of the same measurement, stacked. Hidden by visibility rather
+   than display, so the inactive one keeps its size and is right the moment
+   it is switched to. */
+.chart-stack > .chart { position: absolute; inset: 0; visibility: hidden; }
+.chart-stack > .chart.active { visibility: visible; }
+
 /* chamber-specific: the turntable dial sits beside its readout */
 .dial-body { display: grid; grid-template-columns: minmax(0, 1fr) 150px; gap: 0.6rem; }
 .dial-readout {

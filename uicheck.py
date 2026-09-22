@@ -72,6 +72,26 @@ def synthetic_pattern() -> str:
     return "\n".join(rows) + "\n"
 
 
+def two_plane_pattern() -> str:
+    """A solver export carrying two cut planes in one file.
+
+    Theta is held while phi sweeps, which is how an azimuth cut leaves most
+    solvers. Reading the header in order would take theta as the swept axis and
+    collapse each plane onto a single angle, so this is the case that says
+    whether the importer picked the axis that actually moves - and whether the
+    plane it did not pick is offered as a choice rather than silently merged.
+    """
+    rows = ["Theta [deg],Phi [deg],Freq [GHz],dB(GainTotal)"]
+    for theta, elements in ((90.0, 3.7), (0.0, 1.4)):
+        for i in range(180):
+            phi = -180 + 2 * i
+            x = math.pi * elements * math.sin(math.radians(phi))
+            af = 1.0 if abs(x) < 1e-9 else abs(math.sin(x) / x)
+            db = max(20.0 * math.log10(max(af, 1e-12)), -45.0)
+            rows.append(f"{theta:.1f},{phi:.2f},2.5,{db:.4f}")
+    return "\n".join(rows) + "\n"
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--ws-port", type=int, default=8766)
@@ -207,6 +227,56 @@ def main(argv=None) -> int:
                 check("round-trips its own run", ok, f"delta {delta}")
             else:
                 check("round-trips its own run", False, f"{own} not written")
+
+            # Two cut planes in one file. The plane is the one thing an
+            # import can get silently wrong: a modelled elevation cut
+            # differenced against a measured azimuth cut still produces a
+            # number, and it means nothing. So the picker has to appear, name
+            # the planes, and actually change the comparison.
+            open_section(page, "Simulation")
+            planes = a.shots / "two-plane.csv"
+            planes.write_text(two_plane_pattern())
+            page.set_input_files("#ref-file", str(planes))
+            page.wait_for_timeout(600)
+            opts = page.locator("#ref-plane option").all_inner_texts()
+            check("offers both cut planes",
+                  page.is_visible("#ref-plane-group") and len(opts) == 2,
+                  ", ".join(opts))
+
+            # Phi is the axis that moves; theta names the plane. Taking them
+            # the other way round leaves one point per cut and no overlap.
+            pts = page.evaluate(
+                "document.getElementById('chart-polar').data[1].theta.length")
+            check("sweeps the axis that moves", pts > 100, f"{pts} points")
+
+            first = page.inner_text("#stat-delta")
+            page.select_option("#ref-plane", index=1)
+            page.wait_for_timeout(500)
+            second = page.inner_text("#stat-delta")
+            check("plane changes the comparison",
+                  first != second and "—" not in (first, second),
+                  f"{first} -> {second}")
+
+            # Which chart the overlay lands on, and which chart is on screen,
+            # are two separate questions. Both have to answer.
+            page.select_option("#pattern-view", "rect")
+            page.wait_for_timeout(500)
+            check("rectangular view renders",
+                  page.is_visible("#chart-pattern-rect"),
+                  "angle vs dB")
+            page.screenshot(path=str(a.shots / "pattern-rect.png"))
+
+            page.select_option("#ref-target", "polar")
+            page.wait_for_timeout(400)
+            on = page.evaluate(
+                "[document.getElementById('chart-polar').data[1].visible,"
+                " document.getElementById('chart-pattern-rect').data[1].visible]")
+            check("overlay follows the chart picked", on == [True, False],
+                  f"polar={on[0]} rect={on[1]}")
+
+            page.select_option("#ref-target", "both")
+            page.select_option("#pattern-view", "polar")
+            page.wait_for_timeout(400)
 
             # Calibration. The sim corrects nothing and says so - what is
             # under test is the wizard: the modal opens, the acknowledgement

@@ -13,11 +13,21 @@
  */
 
 const ANGLE_KEYS = ['angle_actual_deg', 'angle_cmd_deg', 'angle_deg', 'angle',
-                    'theta_deg', 'theta', 'phi_deg', 'phi', 'deg'];
+                    'theta_deg', 'theta', 'phi_deg', 'phi', 'az_deg', 'azimuth',
+                    'el_deg', 'elevation', 'deg'];
 const VALUE_KEYS = ['mag_db', 'gain_db', 'gain_dbi', 'db', 'amplitude_db',
                     'magnitude_db', 'directivity_db', 'gain', 'magnitude'];
 const PARAM_KEYS = ['param', 'parameter', 's_param'];
 const FREQ_KEYS = ['freq_hz', 'frequency_hz', 'freq', 'frequency', 'f_hz'];
+// Columns that name a cut plane outright, whatever they hold ('E-plane',
+// 'phi=90', '0'). These are never the swept axis.
+const PLANE_KEYS = ['cut_plane', 'plane', 'cut'];
+// Columns that are an angular axis but not yet known to be *the* axis. A
+// solver export usually carries both Theta and Phi: one of them is swept and
+// the other names the plane it was swept in, and which is which is a property
+// of the rows, not of the header order.
+const AXIS_KEYS = ['theta_deg', 'theta', 'phi_deg', 'phi',
+                   'az_deg', 'azimuth', 'el_deg', 'elevation'];
 
 function splitLine(line) {
     // Comma, tab, or semicolon — whichever the file actually uses. Whitespace
@@ -41,12 +51,57 @@ function findColumn(header, candidates) {
     return -1;
 }
 
+/** Every distinct column index any of `candidates` resolves to, in header order. */
+function columnsFor(header, candidates) {
+    const found = new Set();
+    for (const want of candidates) {
+        const i = findColumn(header, [want]);
+        if (i >= 0) found.add(i);
+    }
+    return [...found].sort((a, b) => a - b);
+}
+
+/** 'Theta [deg]' -> 'theta'. The units are already implied by the degree sign. */
+function axisName(head) {
+    return head.toLowerCase()
+        .replace(/[[(].*$/, '')
+        .replace(/[_\s]*deg(rees)?$/, '')
+        .replace(/[_\s]+$/, '')
+        .trim() || 'cut';
+}
+
 /**
- * Parse CSV text into cuts keyed by "param @ freq".
+ * Name the plane a row was taken in, from whatever columns discriminate it.
  *
- * @returns {{cuts: Map<string, {param: string, freqHz: number|null,
+ * A numeric column reads as 'theta=90°'; anything else is taken as already
+ * being a name ('E-plane') and used as it stands. Several columns join, so a
+ * file cut in both theta and phi still names each plane uniquely.
+ */
+function planeLabel(header, cols, cells) {
+    const parts = [];
+    for (const i of cols) {
+        const raw = (cells[i] ?? '').trim();
+        if (!raw) continue;
+        const num = parseFloat(raw);
+        parts.push(Number.isFinite(num) && /^[-+0-9.eE]+$/.test(raw)
+            ? `${axisName(header[i])}=${Number(num.toFixed(1))}\u00b0`
+            : raw);
+    }
+    return parts.join(', ');
+}
+
+/**
+ * Parse CSV text into cuts keyed by "param @ freq, plane".
+ *
+ * The plane matters as much as the frequency does. A solver asked for a
+ * pattern usually returns every cut it computed in one file, and differencing
+ * a measured azimuth cut against a modelled elevation cut produces a number
+ * that looks like an answer and is not one. So a file that discriminates its
+ * planes is split by them here, and the caller gets to say which one it meant.
+ *
+ * @returns {{cuts: Map<string, {param: string, freqHz: number|null, plane: string,
  *                              angles: number[], values: number[]}>,
- *            rows: number}}
+ *            rows: number, planes: string[]}}
  * @throws {Error} when no angle/dB column pair can be found
  */
 export function parsePattern(text) {
@@ -55,7 +110,7 @@ export function parsePattern(text) {
     if (lines.length < 2) throw new Error('file has no data rows');
 
     const header = splitLine(lines[0]);
-    const iAngle = findColumn(header, ANGLE_KEYS);
+    let iAngle = findColumn(header, ANGLE_KEYS);
     const iValue = findColumn(header, VALUE_KEYS);
     if (iAngle < 0 || iValue < 0) {
         throw new Error(`no angle/dB columns in header: ${header.slice(0, 8).join(', ')}`);
@@ -63,11 +118,29 @@ export function parsePattern(text) {
     const iParam = findColumn(header, PARAM_KEYS);
     const iFreq = findColumn(header, FREQ_KEYS);
 
+    const body = [];
+    for (let n = 1; n < lines.length; n++) body.push(splitLine(lines[n]));
+
+    // Decide which angular column is the sweep before reading any of it.
+    // Header order cannot answer this: an azimuth cut is theta held at 90 with
+    // phi swept, and reading it the other way round collapses a whole pattern
+    // onto one angle. Whichever column actually moves is the sweep.
+    const axisCols = columnsFor(header, AXIS_KEYS);
+    if (axisCols.length > 1 && axisCols.includes(iAngle)) {
+        const spread = (i) => new Set(body.map((c) => (c[i] ?? '').trim())).size;
+        iAngle = axisCols.reduce((a, b) => (spread(b) > spread(a) ? b : a));
+    }
+    // Everything angular that is not the sweep names the plane, as does any
+    // column that says so outright.
+    const planeCols = [...new Set([...columnsFor(header, PLANE_KEYS),
+                                   ...axisCols.filter((i) => i !== iAngle)])]
+        .filter((i) => i !== iAngle && i !== iValue && i !== iParam && i !== iFreq)
+        .sort((a, b) => a - b);
+
     const cuts = new Map();
     let rows = 0;
 
-    for (let n = 1; n < lines.length; n++) {
-        const c = splitLine(lines[n]);
+    for (const c of body) {
         const angle = parseFloat(c[iAngle]);
         const value = parseFloat(c[iValue]);
         if (!Number.isFinite(angle) || !Number.isFinite(value)) continue;
@@ -78,10 +151,11 @@ export function parsePattern(text) {
         // A GHz column read as Hz would sort and label wrong; scale it up.
         else if (freqHz > 0 && freqHz < 1e6) freqHz *= 1e9;
 
-        const key = `${param}|${freqHz ?? ''}`;
+        const plane = planeCols.length ? planeLabel(header, planeCols, c) : '';
+        const key = `${param}|${freqHz ?? ''}|${plane}`;
         let cut = cuts.get(key);
         if (!cut) {
-            cut = { param, freqHz, angles: [], values: [] };
+            cut = { param, freqHz, plane, angles: [], values: [] };
             cuts.set(key, cut);
         }
         cut.angles.push(angle);
@@ -97,7 +171,12 @@ export function parsePattern(text) {
         cut.angles = order.map((i) => cut.angles[i]);
         cut.values = order.map((i) => cut.values[i]);
     }
-    return { cuts, rows };
+    return { cuts, rows, planes: planesOf(cuts) };
+}
+
+/** The distinct cut planes present, in the order they first appear. */
+export function planesOf(cuts) {
+    return [...new Set([...cuts.values()].map((c) => c.plane))];
 }
 
 /** Wrap to (-180, 180]. Matches acquisition/config.py's wrap180. */
@@ -186,5 +265,6 @@ export function traceFor(cut, rotateDeg = 0) {
 /** Human label for a cut, used in the picker and the legend. */
 export function cutLabel(cut) {
     const f = cut.freqHz ? `${(cut.freqHz / 1e9).toFixed(4)} GHz` : 'no freq';
-    return cut.param && cut.param !== '—' ? `${cut.param} @ ${f}` : f;
+    const head = cut.param && cut.param !== '—' ? `${cut.param} @ ${f}` : f;
+    return cut.plane ? `${head}, ${cut.plane}` : head;
 }
