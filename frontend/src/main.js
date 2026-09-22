@@ -12,7 +12,7 @@ import Plotly from 'plotly.js-dist-min';
 import './style.css';
 import { createTransport } from './transport.js';
 import { DialPlot } from './dial.js';
-import { parsePattern, compare, cutLabel } from './reference.js';
+import { parsePattern, compare, cutLabel, planesOf } from './reference.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -105,6 +105,23 @@ function initPlots() {
         },
     }, PLOT_CONFIG);
 
+    // The same cut in rectangular form. Sidelobe levels and null depths are
+    // read off this one; the polar view is for shape and pointing. Both carry
+    // the same two traces so the overlay can be put on either.
+    Plotly.newPlot('chart-pattern-rect', [
+        { type: 'scatter', mode: 'lines', x: [], y: [],
+          line: { color: c.primary, width: 2 }, name: 'measured' },
+        { type: 'scatter', mode: 'lines', x: [], y: [],
+          line: { color: c.reference, width: 1.5, dash: 'dot' },
+          name: 'reference', visible: false, hoverinfo: 'skip' },
+    ], {
+        ...baseLayout(),
+        xaxis: { title: { text: 'Angle (deg)', font: { size: 10 } },
+                 gridcolor: c.grid, zerolinecolor: c.grid, dtick: 45 },
+        yaxis: { title: { text: 'Magnitude (dB)', font: { size: 10 } },
+                 gridcolor: c.grid, zerolinecolor: c.grid },
+    }, PLOT_CONFIG);
+
     Plotly.newPlot('chart-rect', [{
         type: 'scatter', mode: 'lines', x: [], y: [],
         line: { color: c.secondary, width: 1.8 },
@@ -165,6 +182,12 @@ function restylePlots() {
         'polar.angularaxis.linecolor': c.grid,
     });
     Plotly.restyle('chart-polar', { 'line.color': [c.primary, c.reference] }, [0, 1]);
+    Plotly.relayout('chart-pattern-rect', {
+        'font.color': c.muted,
+        'xaxis.gridcolor': c.grid, 'xaxis.zerolinecolor': c.grid,
+        'yaxis.gridcolor': c.grid, 'yaxis.zerolinecolor': c.grid,
+    });
+    Plotly.restyle('chart-pattern-rect', { 'line.color': [c.primary, c.reference] }, [0, 1]);
     Plotly.relayout('chart-rect', {
         'font.color': c.muted,
         'xaxis.gridcolor': c.grid, 'xaxis.zerolinecolor': c.grid,
@@ -206,7 +229,35 @@ function measuredCut() {
     return { r, theta };
 }
 
-function redrawPolar() {
+/** Bring an angle into [lo, lo+360), so a reference and a measurement that
+ *  were written on different conventions share one axis. */
+function wrapInto(a, lo) {
+    return lo + ((((a - lo) % 360) + 360) % 360);
+}
+
+/**
+ * One trace for the rectangular view, sorted along the angle axis.
+ *
+ * A cut that wraps out of the measured span arrives in two pieces once its
+ * angles are brought into the same domain. A line drawn straight across the
+ * gap between them is not data, so the gap is broken with a null instead.
+ */
+function rectSeries(angles, values, lo) {
+    const pts = angles.map((a, i) => [wrapInto(a, lo), values[i]])
+        .sort((u, v) => u[0] - v[0]);
+    const steps = pts.slice(1).map((q, i) => q[0] - pts[i][0]).sort((u, v) => u - v);
+    const typical = steps.length ? steps[Math.floor(steps.length / 2)] : 0;
+    const x = [], y = [];
+    for (let i = 0; i < pts.length; i++) {
+        if (i && typical > 0 && pts[i][0] - pts[i - 1][0] > 3 * typical) {
+            x.push(null); y.push(null);
+        }
+        x.push(pts[i][0]); y.push(pts[i][1]);
+    }
+    return { x, y };
+}
+
+function redrawPattern() {
     if (!state.angles.length || !state.grid.length) return;
     const { r, theta } = measuredCut();
     if (!r.length) return;
@@ -231,7 +282,7 @@ function redrawPolar() {
     // peak, which is the only way a model in dBi and a measurement in raw dB
     // can share an axis at all.
     const cut = selectedCut();
-    const showRef = cut && $('ref-show').checked;
+    const showRef = !!cut && $('ref-show').checked;
     let refR = [], refT = [];
     if (showRef) {
         const rot = parseFloat($('ref-rotate').value) || 0;
@@ -246,6 +297,12 @@ function redrawPolar() {
         }
     }
 
+    // Which view the overlay lands on. The comparison is the same either way;
+    // the answer is only about where it is easiest to read.
+    const target = $('ref-target').value;
+    const onPolar = showRef && target !== 'rect';
+    const onRect = showRef && target !== 'polar';
+
     // Clamp the floor. A single bad point (a null on the noise floor, or a
     // dropped sweep) would otherwise drag the radial axis to -120 dB and
     // squash the entire pattern into the outer ring.
@@ -257,8 +314,25 @@ function redrawPolar() {
         : [Math.floor(lo / 10) * 10 - 5, Math.ceil(Math.max(...span) / 10) * 10 + 5];
 
     Plotly.update('chart-polar',
-        { r: [rOut, refR], theta: [tOut, refT], visible: [true, showRef] },
+        { r: [rOut, onPolar ? refR : []], theta: [tOut, onPolar ? refT : []],
+          visible: [true, onPolar] },
         { 'polar.radialaxis.range': range }, [0, 1]);
+
+    // The rectangular view shares the reference's shift and the radial range;
+    // only the axis differs. Angles run along it from wherever the scan
+    // started, so a 0..355 run and a -180..175 run each read as one span
+    // rather than one wrapped in half.
+    const base = Math.min(...theta);
+    const meas = rectSeries(theta, rr, base);
+    const ref = onRect ? rectSeries(refT, refR, base) : { x: [], y: [] };
+    const xs = [...meas.x, ...ref.x].filter((v) => v !== null);
+    // One angle in, both ends of the range are the same number and the axis
+    // has nowhere to draw. Give it a degree either side until a second arrives.
+    const xLo = Math.min(...xs), xHi = Math.max(...xs);
+    Plotly.update('chart-pattern-rect',
+        { x: [meas.x, ref.x], y: [meas.y, ref.y], visible: [true, onRect] },
+        { 'yaxis.range': range,
+          'xaxis.range': xHi > xLo ? [xLo, xHi] : [xLo - 1, xLo + 1] }, [0, 1]);
 
     const peak = Math.max(...r);
     $('stat-peak').textContent = `${peak.toFixed(2)} dB`;
@@ -320,7 +394,7 @@ function updateDelta() {
 }
 
 function applyReference() {
-    redrawPolar();
+    redrawPattern();
     updateDelta();
 }
 
@@ -334,16 +408,43 @@ function fillCutPickers() {
         o.textContent = p;
         sel.appendChild(o);
     }
+    fillPlanePicker();
+}
+
+/**
+ * The cut planes the file holds for the parameter in hand.
+ *
+ * Hidden when there is only one, because a picker with a single answer is not
+ * a question. Shown the moment a file distinguishes its cuts, which is the
+ * point of the thing: a modelled elevation cut differenced against a measured
+ * azimuth cut produces a number that is about nothing at all.
+ */
+function fillPlanePicker() {
+    const param = $('ref-param').value;
+    const planes = planesOf(
+        new Map([...reference.cuts].filter(([, c]) => c.param === param)));
+    const sel = $('ref-plane');
+    const prev = sel.value;
+    sel.innerHTML = '';
+    for (const plane of planes) {
+        const o = document.createElement('option');
+        o.value = plane;
+        o.textContent = plane || 'the only cut in the file';
+        sel.appendChild(o);
+    }
+    sel.value = planes.includes(prev) ? prev : (planes[0] ?? '');
+    $('ref-plane-group').hidden = planes.length < 2;
     fillFreqPicker();
 }
 
 function fillFreqPicker() {
     const param = $('ref-param').value;
+    const plane = $('ref-plane').value;
     const sel = $('ref-freq');
     sel.innerHTML = '';
     let first = null;
     for (const [key, cut] of reference.cuts) {
-        if (cut.param !== param) continue;
+        if (cut.param !== param || cut.plane !== plane) continue;
         const o = document.createElement('option');
         o.value = key;
         o.textContent = cut.freqHz ? `${(cut.freqHz / 1e9).toFixed(4)} GHz` : 'no frequency';
@@ -357,7 +458,7 @@ function fillFreqPicker() {
         const target = state.freqs[state.cutIndex];
         let best = Infinity;
         for (const [key, cut] of reference.cuts) {
-            if (cut.param !== param || !cut.freqHz) continue;
+            if (cut.param !== param || cut.plane !== plane || !cut.freqHz) continue;
             const d = Math.abs(cut.freqHz - target);
             if (d < best) { best = d; want = key; }
         }
@@ -368,13 +469,25 @@ function fillFreqPicker() {
 
 async function loadReference(file) {
     try {
-        const { cuts, rows } = parsePattern(await file.text());
+        const { cuts, rows, planes } = parsePattern(await file.text());
         reference = { name: file.name, cuts, key: null };
         $('ref-name').textContent = file.name;
         $('ref-summary').hidden = false;
         fillCutPickers();
         applyReference();
-        addLog('info', 'sim', `imported ${file.name}: ${rows} rows, ${cuts.size} cut(s)`);
+        // Say how the file was read. Which plane the comparison is against is
+        // the one thing an import can get silently wrong, so it is stated
+        // rather than left to be noticed.
+        const how = planes.length > 1
+            ? `${planes.length} cut planes (${planes.join(', ')})`
+            : planes[0] ? `cut plane ${planes[0]}` : 'one cut plane';
+        addLog('info', 'sim',
+               `imported ${file.name}: ${rows} rows, ${cuts.size} cut(s), ${how}`);
+        const picked = selectedCut();
+        if (planes.length > 1 && picked) {
+            addLog('warn', 'sim',
+                   `comparing against ${cutLabel(picked)} \u2014 pick the plane the tower actually cut in`);
+        }
     } catch (e) {
         addLog('error', 'sim', `${file.name}: ${e.message}`);
     }
@@ -384,6 +497,7 @@ function clearReference() {
     reference = { name: '', cuts: null, key: null };
     $('ref-file').value = '';
     $('ref-summary').hidden = true;
+    $('ref-plane-group').hidden = true;
     applyReference();
     addLog('info', 'sim', 'reference cleared');
 }
@@ -783,7 +897,7 @@ const transport = createTransport({
         $('stat-cmd').textContent = `${m.angle_cmd.toFixed(1)}°`;
         $('stat-remaining').textContent = `${Math.max(0, n - state.done)}`;
         dial.setData({ done: state.done, commanded: m.angle_cmd });
-        redrawPolar();
+        redrawPattern();
         redrawRect();
     },
     onScanDone: (m) => {
@@ -1001,7 +1115,7 @@ async function loadRun(name) {
     $('stat-remaining').textContent = '0';
     dial.setData({ grid: d.angles, done: d.angles.length, commanded: null });
     dial.draw();
-    redrawPolar();
+    redrawPattern();
     redrawRect();
     addLog('info', 'runs', `loaded ${name}: ${d.angles.length} angles`);
 }
@@ -1202,8 +1316,17 @@ function onSweepDone(m) {
     syncControls();
 }
 
+/** Polar or rectangular. Both charts hold the same traces; this only says
+ *  which one is on screen. */
+function setPatternView(view) {
+    $('chart-polar').classList.toggle('active', view !== 'rect');
+    $('chart-pattern-rect').classList.toggle('active', view === 'rect');
+    requestAnimationFrame(resizeAll);
+}
+
 function resizeAll() {
     Plotly.Plots.resize('chart-polar');
+    Plotly.Plots.resize('chart-pattern-rect');
     Plotly.Plots.resize('chart-rect');
     Plotly.Plots.resize('chart-smith');
     Plotly.Plots.resize('chart-sweep-mag');
@@ -1268,23 +1391,26 @@ function wire() {
     $('cut-freq').addEventListener('change', (e) => {
         state.cutIndex = parseInt(e.target.value, 10);
         if (reference.cuts) fillFreqPicker();
-        redrawPolar();
+        redrawPattern();
     });
-    $('normalize').addEventListener('change', redrawPolar);
+    $('normalize').addEventListener('change', redrawPattern);
 
     $('ref-file').addEventListener('change', (e) => {
         const f = e.target.files?.[0];
         if (f) loadReference(f);
     });
     $('btn-ref-clear').addEventListener('click', clearReference);
-    $('ref-param').addEventListener('change', () => { fillFreqPicker(); applyReference(); });
+    $('ref-param').addEventListener('change', () => { fillPlanePicker(); applyReference(); });
+    $('ref-plane').addEventListener('change', () => { fillFreqPicker(); applyReference(); });
     $('ref-freq').addEventListener('change', (e) => {
         reference.key = e.target.value;
         applyReference();
     });
-    for (const id of ['ref-show', 'ref-normalize', 'ref-rotate']) {
+    for (const id of ['ref-show', 'ref-normalize', 'ref-rotate', 'ref-target']) {
         $(id).addEventListener('input', applyReference);
     }
+
+    $('pattern-view').addEventListener('change', (e) => setPatternView(e.target.value));
 
     ['a-start', 'a-stop', 'a-step'].forEach((id) =>
         $(id).addEventListener('input', updateAngleCount));

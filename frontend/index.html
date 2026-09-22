@@ -211,8 +211,22 @@
                       <select class="modern-select" id="ref-freq"></select>
                     </div>
                   </div>
+                  <!-- Shown only when the file actually distinguishes its
+                       planes: a single-cut export has nothing to choose. -->
+                  <div class="control-group mt-2" id="ref-plane-group" hidden>
+                    <label for="ref-plane" title="Which cut of the import to compare against. An azimuth cut and an elevation cut are different patterns, and differencing one against the other answers nothing.">Cut plane</label>
+                    <select class="modern-select" id="ref-plane"></select>
+                  </div>
+                  <div class="control-group mt-2">
+                    <label for="ref-target">Overlay on</label>
+                    <select class="modern-select" id="ref-target">
+                      <option value="both">both pattern views</option>
+                      <option value="polar">polar only</option>
+                      <option value="rect">rectangular only</option>
+                    </select>
+                  </div>
                   <label class="toggle-container mt-2">
-                    <span>Overlay on pattern</span>
+                    <span>Show overlay</span>
                     <input type="checkbox" id="ref-show" checked /><span class="checkmark"></span>
                   </label>
                   <label class="toggle-container mt-2" title="Align the reference peak with the measured peak before differencing">
@@ -301,6 +315,12 @@
               <div class="pane-header">
                 <h3>Pattern</h3>
                 <div class="pane-tools">
+                  <label class="inline-field"><span>View</span>
+                    <select class="modern-select" id="pattern-view">
+                      <option value="polar">polar</option>
+                      <option value="rect">rectangular</option>
+                    </select>
+                  </label>
                   <label class="inline-field"><span>Cut freq</span>
                     <select class="modern-select" id="cut-freq"></select>
                   </label>
@@ -310,7 +330,14 @@
                   </label>
                 </div>
               </div>
-              <div class="pane-body"><div id="chart-polar" class="chart"></div></div>
+              <!-- Both views stay laid out and both carry the same traces;
+                   the picker only chooses which one is on screen. A Plotly
+                   chart that measures zero while hidden comes back the wrong
+                   size, so neither is ever display:none. -->
+              <div class="pane-body chart-stack">
+                <div id="chart-polar" class="chart active"></div>
+                <div id="chart-pattern-rect" class="chart"></div>
+              </div>
             </div>
           </div>
 
