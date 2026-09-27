@@ -278,6 +278,31 @@ def main(argv=None) -> int:
             page.select_option("#pattern-view", "polar")
             page.wait_for_timeout(400)
 
+            # Which measured cut the overlay sits on. Pinning one from the
+            # Simulation panel has to move the Pattern tab's cut with it, and
+            # 'match' has to land on the measured frequency nearest the
+            # reference's own.
+            before = page.input_value("#cut-freq")
+            page.select_option("#ref-meas", "0")
+            page.wait_for_timeout(400)
+            check("pins the measured cut",
+                  page.input_value("#cut-freq") == "0",
+                  f"cut-freq {before} -> {page.input_value('#cut-freq')}")
+            page.select_option("#ref-meas", "match")
+            page.wait_for_timeout(400)
+            want = page.evaluate(
+                "(() => { const s = window.__chamber.state;"
+                " const hz = parseFloat(document.getElementById('ref-freq').value.split('|')[1]);"
+                " let b = 0; s.freqs.forEach((f, i) => {"
+                " if (Math.abs(f - hz) < Math.abs(s.freqs[b] - hz)) b = i; });"
+                " return String(b); })()")
+            check("matches the reference frequency",
+                  page.input_value("#cut-freq") == want,
+                  f"cut-freq {page.input_value('#cut-freq')}, nearest {want}")
+            page.select_option("#ref-meas", "follow")
+            page.select_option("#cut-freq", before)
+            page.wait_for_timeout(400)
+
             # Calibration. The sim corrects nothing and says so - what is
             # under test is the wizard: the modal opens, the acknowledgement
             # gates the button, the run reports steps, and the panel picks up

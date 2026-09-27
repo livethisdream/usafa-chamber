@@ -51,6 +51,12 @@ const REFLECTION = ['S11', 'S22'];
 // selected. Display-side only — the service never learns a comparison is on.
 let reference = { name: '', cuts: null, key: null };
 
+// Which measured cut the reference is laid over. 'follow' leaves it to the
+// Pattern tab's cut frequency, 'match' tracks whichever frequency the
+// reference cut was taken at, and 'pin' holds one measured frequency, kept by
+// Hz so it survives a new scan with a different sweep.
+let measChoice = { mode: 'follow', pinHz: null };
+
 const dial = new DialPlot($('dial'));
 
 // ---------------------------------------------------------------------------
@@ -362,6 +368,64 @@ function populateCutFreqs() {
     });
     state.cutIndex = Math.floor(state.freqs.length / 2);
     sel.value = state.cutIndex;
+    fillMeasPicker();
+    syncMeasuredCut();
+}
+
+/** Point the measured cut at frequency index `k`, and the tab's picker with it. */
+function setCutIndex(k) {
+    if (!Number.isInteger(k) || k < 0 || k >= state.freqs.length) return;
+    state.cutIndex = k;
+    $('cut-freq').value = k;
+}
+
+/** Index of the measured frequency nearest `hz`, or -1 with nothing measured. */
+function nearestFreqIndex(hz) {
+    let best = -1, bestD = Infinity;
+    state.freqs.forEach((f, i) => {
+        const d = Math.abs(f - hz);
+        if (d < bestD) { bestD = d; best = i; }
+    });
+    return best;
+}
+
+/**
+ * The measured-cut picker in the Simulation panel.
+ *
+ * The two automatic choices come first, then every measured frequency. A
+ * pinned frequency is shown against the nearest one the current sweep holds,
+ * which is the same frequency whenever the sweep has not changed.
+ */
+function fillMeasPicker() {
+    const sel = $('ref-meas');
+    sel.innerHTML = '';
+    const add = (value, text) => {
+        const o = document.createElement('option');
+        o.value = value;
+        o.textContent = text;
+        sel.appendChild(o);
+    };
+    add('follow', "Pattern tab's cut freq");
+    add('match', 'nearest the reference freq');
+    state.freqs.forEach((f, i) => add(String(i), `${(f / 1e9).toFixed(4)} GHz`));
+
+    if (measChoice.mode === 'pin' && measChoice.pinHz !== null && state.freqs.length) {
+        sel.value = String(nearestFreqIndex(measChoice.pinHz));
+    } else {
+        if (measChoice.mode === 'pin') measChoice = { mode: 'follow', pinHz: null };
+        sel.value = measChoice.mode;
+    }
+}
+
+/** Move the measured cut to wherever the picker says it should be. */
+function syncMeasuredCut() {
+    if (!state.freqs.length) return;
+    if (measChoice.mode === 'pin' && measChoice.pinHz !== null) {
+        setCutIndex(nearestFreqIndex(measChoice.pinHz));
+    } else if (measChoice.mode === 'match') {
+        const cut = selectedCut();
+        if (cut?.freqHz) setCutIndex(nearestFreqIndex(cut.freqHz));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -385,8 +449,11 @@ function updateDelta() {
         rotateDeg: parseFloat($('ref-rotate').value) || 0,
     });
     $('stat-delta').textContent = stats ? `${stats.rms.toFixed(2)} dB` : 'no overlap';
+    const measF = state.freqs.length
+        ? `measured ${(state.freqs[state.cutIndex] / 1e9).toFixed(4)} GHz vs ` +
+          `${cutLabel(cut)}: ` : '';
     $('stat-box-delta').title = stats
-        ? `RMS ${stats.rms.toFixed(2)} dB over ${stats.n} angles, ` +
+        ? measF + `RMS ${stats.rms.toFixed(2)} dB over ${stats.n} angles, ` +
           `down to ${stats.floorDb} dB from peak; ` +
           `worst ${stats.max >= 0 ? '+' : ''}${stats.max.toFixed(2)} dB ` +
           `at ${stats.at.toFixed(1)}°`
@@ -465,6 +532,7 @@ function fillFreqPicker() {
     }
     reference.key = want;
     if (want) sel.value = want;
+    syncMeasuredCut();
 }
 
 async function loadReference(file) {
@@ -473,6 +541,7 @@ async function loadReference(file) {
         reference = { name: file.name, cuts, key: null };
         $('ref-name').textContent = file.name;
         $('ref-summary').hidden = false;
+        fillMeasPicker();
         fillCutPickers();
         applyReference();
         // Say how the file was read. Which plane the comparison is against is
@@ -1390,6 +1459,16 @@ function wire() {
 
     $('cut-freq').addEventListener('change', (e) => {
         state.cutIndex = parseInt(e.target.value, 10);
+        // Picking a cut by hand here is the same question the Simulation
+        // panel asks, so the answer there follows: a pin moves to the new
+        // frequency, and 'match' gives way rather than snap straight back.
+        if (measChoice.mode === 'pin') {
+            measChoice.pinHz = state.freqs[state.cutIndex];
+            $('ref-meas').value = String(state.cutIndex);
+        } else if (measChoice.mode === 'match') {
+            measChoice = { mode: 'follow', pinHz: null };
+            $('ref-meas').value = 'follow';
+        }
         if (reference.cuts) fillFreqPicker();
         redrawPattern();
     });
@@ -1404,6 +1483,15 @@ function wire() {
     $('ref-plane').addEventListener('change', () => { fillFreqPicker(); applyReference(); });
     $('ref-freq').addEventListener('change', (e) => {
         reference.key = e.target.value;
+        syncMeasuredCut();
+        applyReference();
+    });
+    $('ref-meas').addEventListener('change', (e) => {
+        const v = e.target.value;
+        measChoice = v === 'follow' || v === 'match'
+            ? { mode: v, pinHz: null }
+            : { mode: 'pin', pinHz: state.freqs[parseInt(v, 10)] ?? null };
+        syncMeasuredCut();
         applyReference();
     });
     for (const id of ['ref-show', 'ref-normalize', 'ref-rotate', 'ref-target']) {
