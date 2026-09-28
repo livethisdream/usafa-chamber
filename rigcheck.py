@@ -474,6 +474,45 @@ def check_cal_no_apply(r, outdir):
     return "cal that applied nothing reported as a failure"
 
 
+def s_cal_characterization():
+    # The module's factory characterization reads exactly like a sweep setup -
+    # "100 kHz, 22 GHz, 1601" - and read as one it says the VNA recalibrates
+    # its whole range on every cal. It does not: the cal runs at the channel's
+    # sweep. This pins the label that says which of the two the numbers are.
+    return {"_target": "cal"}, []
+
+
+def check_cal_characterization(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    chars = (r["cal"].get("record") or {}).get("module_characterization")
+    assert chars, "the cal record kept no module characterization"
+    assert chars["points"] == 1601 and chars["stop"] == "22 GHz", chars
+    said = [m for m in r["cal"]["logs"] if "module characterized" in m]
+    assert said, "the characterization was recorded but never said out loud"
+    assert "not this" in said[0] and "sweep" in said[0], (
+        f"reported without saying which of the two it is: {said[0]}")
+    return f"module range {chars['start']}-{chars['stop']} recorded and labelled"
+
+
+def s_cal_unverified():
+    # Correction on, with no calibration taken through this dashboard - the
+    # state a cal run in the VNA's own software leaves behind. cal_mismatch has
+    # no record to compare against and returns empty, which reads as "nothing
+    # to report" and is the wrong answer: configure() is about to set a sweep
+    # that may already have invalidated the thing the pill is calling cal.
+    return {"_target": "cal"}, ["--scan-only"]
+
+
+def check_cal_unverified(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    assert r["cal"]["record"] is None, "the scenario began with a cal recorded"
+    warned = [m for m in r["cal"]["logs"]
+              if "no calibration was taken through this dashboard" in m]
+    assert warned, ("correction read ON with nothing to vouch for it, and the "
+                    "run said nothing")
+    return "unrecorded correction reported rather than trusted"
+
+
 def s_cal_error_surfaced():
     # The 2026-09-17 fault, reproduced: the cal is accepted, applies nothing,
     # and the only account of why is one line in the error queue. Reading that
@@ -648,6 +687,8 @@ SCENARIOS = [
     ("cal_fails", s_cal_fails_midway, check_cal_fails_midway),
     ("cal_no_apply", s_cal_no_apply, check_cal_no_apply),
     ("cal_error_surfaced", s_cal_error_surfaced, check_cal_error_surfaced),
+    ("cal_characterization", s_cal_characterization, check_cal_characterization),
+    ("cal_unverified", s_cal_unverified, check_cal_unverified),
     ("cal_cancelled", s_cal_cancelled, check_cal_cancelled),
     ("sweep_nominal", s_sweep_nominal, check_sweep_nominal),
     ("sweep_vs_scan", s_sweep_vs_scan, check_sweep_vs_scan),
@@ -868,6 +909,13 @@ def _run_cal(argv: list[str]) -> int:
                 _CAL_RESULT["scan_reason"] = str(e)
             finally:
                 stop2.set()
+        elif "--scan-only" in argv:
+            # No calibration through this dashboard at all, on an instrument
+            # that reports correction on: what a cal done in the VNA's own
+            # software leaves behind.
+            svc._run_scan(cs.ScanRequest(start_deg=0.0, stop_deg=90.0,
+                                         step_deg=90.0, points=21,
+                                         name=outdir.name))
         else:
             ports = ((int(argv[argv.index("--ports") + 1]),)
                      if "--ports" in argv else (1, 2))
@@ -879,6 +927,8 @@ def _run_cal(argv: list[str]) -> int:
             "done": done[-1] if done else None,
             "record": svc.calibration,
             "saved": (cs.RUNS_DIR / cs.CAL_NAME).is_file(),
+            "logs": [f.get("message", "") for f in frames
+                     if f.get("type") == "log"],
         })
 
         if "--then-scan" in argv:

@@ -191,6 +191,30 @@ def cal_mismatch(record: dict | None, req) -> list[str]:
     return out
 
 
+def cal_unverified(record: dict | None, correction: str | None) -> str | None:
+    """Why a correction reading ON still cannot be vouched for, or None.
+
+    The dashboard can see *that* the instrument is corrected - CORR:STAT? says
+    so, and the pill goes green on it - but not what sweep the correction was
+    solved at, unless it ran the calibration itself. A calibration performed in
+    the VNA's own software leaves no record here, so cal_mismatch has nothing
+    to compare against and returns empty: "no calibration to disagree with".
+
+    That silence is the wrong answer in the one case where it matters most.
+    Every run configures the sweep before measuring, and setting the sweep is
+    exactly what invalidates a calibration - so an unrecorded cal is the state
+    where the instrument is most likely to be quietly interpolating, and the
+    state the operator is least likely to suspect, because the pill says cal.
+    """
+    if pm.correction_is_on(correction) is not True:
+        return None          # off or unknown - correction_state already says so
+    if record:
+        return None          # cal_mismatch owns the recorded case
+    return ("error correction is ON, but no calibration was taken through this "
+            "dashboard - the sweep it was solved at is unknown, and setting "
+            "this run's sweep may already have invalidated it")
+
+
 # --------------------------------------------------------------------------
 # Backends
 # --------------------------------------------------------------------------
@@ -238,6 +262,11 @@ class SimBackend:
 
     def acm_module(self) -> str | None:
         return "SIMULATED AutoCal module (no hardware)"
+
+    def acm_characterization(self) -> dict | None:
+        # The shape a real ACM2202.1 reports, so the label the cal log writes
+        # is exercised in sim rather than only on the rig.
+        return {"start": "100 kHz", "stop": "22 GHz", "points": 1601}
 
     def calibrate(self, req: "CalRequest", on_step=None,
                   should_stop=None) -> str:
@@ -407,6 +436,9 @@ class HardwareBackend:
 
     def acm_module(self) -> str | None:
         return self.vna.acm_module()
+
+    def acm_characterization(self) -> dict | None:
+        return self.vna.acm_characterization()
 
     def calibrate(self, req: "CalRequest", on_step=None,
                   should_stop=None) -> str:
@@ -740,6 +772,9 @@ class ChamberService:
             if corr_on is False:
                 self.log("warn", "vna", f"error correction is OFF ({correction}) "
                                         f"- this sweep is uncalibrated")
+            unverified = cal_unverified(self.calibration, correction)
+            if unverified:
+                self.log("warn", "vna", unverified)
 
             for i, parameter in enumerate(req.parameters):
                 if self._sweep_cancel.is_set():
@@ -791,6 +826,17 @@ class ChamberService:
                         "the ACM's USB connection, and see whether this build "
                         "exposes AutoCal to SCPI at all")
                 self.push({"type": "cal_step", "message": f"module: {module}"})
+                # Said in full, and said as a module property. These three
+                # numbers look exactly like a sweep setup, and read as one they
+                # suggest the VNA calibrates its whole range every time. It does
+                # not: the cal runs at this run's sweep, printed just below.
+                chars = self.backend.acm_characterization()
+                if chars:
+                    self.log("info", "cal",
+                             f"module characterized {chars['start']}-"
+                             f"{chars['stop']} at {chars['points']} pts "
+                             f"- the module's own range, not this "
+                             f"calibration's sweep")
                 state = self.backend.calibrate(req, on_step=step,
                                                should_stop=self._cal_cancel.is_set)
 
@@ -800,6 +846,7 @@ class ChamberService:
                       "ports": list(req.ports),
                       "reference_plane": req.reference_plane,
                       "module": module,
+                      "module_characterization": chars,
                       "mode": self.backend.mode,
                       "sweep": req.sweep(),
                       "correction_state": state}
@@ -871,6 +918,9 @@ class ChamberService:
                 self.log("warn", "vna",
                          "this run does not match the calibration: "
                          + "; ".join(drift))
+            unverified = cal_unverified(self.calibration, correction)
+            if unverified:
+                self.log("warn", "vna", unverified)
 
             self.push({"type": "scan_started", "name": name,
                        "angles": angles.tolist(), "freqs": freqs.tolist(),

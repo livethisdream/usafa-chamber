@@ -341,8 +341,12 @@ def main(argv=None) -> int:
                   page.inner_text("#cal-result"))
             page.click("#cal-cancel")
             page.wait_for_timeout(300)
+            # The point count is part of the record on purpose: seeing the
+            # cal's own points here is what stops the module's 1601-point
+            # characterization being read as the calibration's setup.
             check("cal record lands in the panel",
-                  page.inner_text("#cal-summary") != "none recorded",
+                  page.inner_text("#cal-summary") != "none recorded"
+                  and "pts" in page.inner_text("#cal-summary"),
                   page.inner_text("#cal-summary"))
 
             page.fill("#f-start", "5")

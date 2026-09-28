@@ -396,6 +396,15 @@ class Vna:
         attached. Short timeout on both, because an unsupported header on this
         firmware answers -110 and then goes quiet.
         """
+        fields = self._acm_info_fields()
+        if not fields:
+            return None
+        if len(fields) > 1 and fields[1]:
+            return f"{fields[0]} s/n {fields[1]}"
+        return fields[0]
+
+    def _acm_info_fields(self) -> list[str] | None:
+        """INF? split into fields, or None when no module answers."""
         saved, self.io.timeout = self.io.timeout, 5_000
         try:
             if self.io.query(self.acm.ready).strip() not in ("1", "+1"):
@@ -410,11 +419,34 @@ class Vna:
             except pyvisa.VisaIOError:
                 pass
         fields = [f.strip() for f in raw.split(",")]
-        if not fields[0]:
+        return fields if fields and fields[0] else None
+
+    def acm_characterization(self) -> dict | None:
+        """The module's factory characterization: its span, and how many points.
+
+        A property of the ACM, not of any calibration. The module's standards
+        are characterized once at the factory across its whole usable range;
+        a calibration solved from it runs at whatever sweep the channel is set
+        to, interpolating these points onto that grid. The two are easy to
+        confuse - "100 kHz, 22 GHz, 1601" reads exactly like a sweep setup -
+        and confusing them costs an afternoon, so it is reported under a name
+        that says which one it is.
+
+        Field positions are inferred from the one ACM2202.1 reply captured on
+        2026-09-15, so every field is checked before it is believed and an
+        unrecognised shape returns None rather than a confident wrong answer.
+        """
+        fields = self._acm_info_fields()
+        if fields is None or len(fields) < 8:
             return None
-        if len(fields) > 1 and fields[1]:
-            return f"{fields[0]} s/n {fields[1]}"
-        return fields[0]
+        start, stop, points = fields[5], fields[6], fields[7]
+        if not (_looks_like_freq(start) and _looks_like_freq(stop)):
+            return None
+        try:
+            n = int(points)
+        except ValueError:
+            return None
+        return {"start": start, "stop": stop, "points": n}
 
     def acm_clear(self) -> None:
         """Discard any half-collected calibration.
@@ -784,6 +816,11 @@ def correction_is_on(state: str | None) -> bool | None:
     if s in ("0", "+0", "OFF", "FALSE"):
         return False
     return None
+
+
+def _looks_like_freq(text: str) -> bool:
+    """True for '100 kHz', '22 GHz' and the like - a number and a unit."""
+    return bool(re.fullmatch(r"[\d.]+\s*[kMG]?Hz", text.strip(), re.IGNORECASE))
 
 
 def _wrap180(x: float) -> float:

@@ -727,10 +727,20 @@ function renderCalibration() {
         warn.hidden = true;
         return;
     }
+    // The point count earns its place beside the span: a calibration is solved
+    // at the sweep's own points, and seeing "101 pts" here is what stops the
+    // module's 1601-point characterization being read as the cal's setup.
     const span = `${(rec.sweep.start_hz / 1e9).toFixed(3)}–`
-               + `${(rec.sweep.stop_hz / 1e9).toFixed(3)} GHz`;
+               + `${(rec.sweep.stop_hz / 1e9).toFixed(3)} GHz`
+               + (rec.sweep.points ? `, ${rec.sweep.points} pts` : '');
     summary.textContent = `${calAgeText(rec)}, ${span}`
         + (rec.mode === 'sim' ? ' (simulated)' : '');
+    const chars = rec.module_characterization;
+    summary.title = chars
+        ? `Calibrated at the sweep above. The module itself is characterized `
+          + `${chars.start}–${chars.stop} at ${chars.points} points — its `
+          + `usable range, not this calibration's sweep.`
+        : '';
 
     const drift = calDrift(rec);
     if (drift.length) {
