@@ -261,9 +261,14 @@ def main(argv=None) -> int:
             # are two separate questions. Both have to answer.
             page.select_option("#pattern-view", "rect")
             page.wait_for_timeout(500)
+            # `is_visible` does not read opacity, so ask for the property the
+            # view switch actually sets.
+            shown = page.evaluate(
+                "[getComputedStyle(document.getElementById('chart-polar')).opacity,"
+                " getComputedStyle(document.getElementById('chart-pattern-rect')).opacity]")
             check("rectangular view renders",
-                  page.is_visible("#chart-pattern-rect"),
-                  "angle vs dB")
+                  page.is_visible("#chart-pattern-rect") and shown == ['0', '1'],
+                  f"polar opacity {shown[0]}, rect opacity {shown[1]}")
             page.screenshot(path=str(a.shots / "pattern-rect.png"))
 
             page.select_option("#ref-target", "polar")
@@ -356,12 +361,22 @@ def main(argv=None) -> int:
             check("lists stored runs", page.locator(".run-row").count() > 0,
                   f"{page.locator('.run-row').count()} run(s)")
 
+            # Every tab, including the two-chart Sweep pane. The pattern views
+            # are checked as hidden on each one: an inactive pane is hidden with
+            # `visibility`, and a descendant that sets `visibility: visible`
+            # overrides its ancestor and paints straight over whichever tab is
+            # actually on screen. That is not a hypothetical - it shipped.
             for tab, probe in (("VNA", "#chart-rect"),
+                               ("Sweep", "#chart-smith"),
                                ("Turntable", "#dial"),
                                ("Logs", "#log")):
                 page.click(f".tab-btn:has-text('{tab}')")
                 page.wait_for_timeout(400)
                 check(f"{tab.lower()} tab renders", page.is_visible(probe))
+                leaked = [sel for sel in ("#chart-polar", "#chart-pattern-rect")
+                          if page.is_visible(sel)]
+                check(f"{tab.lower()} tab is not overlaid", not leaked,
+                      ", ".join(leaked) or "no pattern chart bleeds through")
                 page.screenshot(path=str(a.shots / f"tab-{tab.lower()}.png"))
 
             page.click(".tab-btn:has-text('Pattern Measurement')")
