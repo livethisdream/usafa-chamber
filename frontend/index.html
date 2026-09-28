@@ -83,15 +83,19 @@
             <!-- 0. VNA -->
             <div class="accordion-item active">
               <button class="accordion-header" title="Copper Mountain sweep settings, and what the instrument reports back">
-                <span class="accordion-head-left"><span class="accordion-icon" data-icon="0"></span> VNA</span>
+                <span class="accordion-head-left"><span class="accordion-icon" data-icon="0"></span> <span id="rx-label">VNA</span></span>
                 <span class="chevron">▼</span>
               </button>
               <div class="accordion-body">
                 <div class="kv"><span>Identity</span><span id="vna-idn" class="mono">—</span></div>
                 <div class="kv"><span>Error correction</span><span id="vna-corr" class="mono">—</span></div>
-                <div class="kv"><span>Calibration</span><span id="cal-summary" class="mono">none recorded</span></div>
-                <p class="cal-warn" id="cal-drift" hidden></p>
-                <button class="btn btn-outline btn-small btn-wide" id="btn-cal" title="Run a 2-port AutoCal with the ACM2202 at the sweep settings below">Calibrate…</button>
+                <!-- Grouped so a receiver with no calibration hides the whole
+                     block rather than leaving a stranded "none recorded". -->
+                <div id="cal-panel">
+                  <div class="kv"><span>Calibration</span><span id="cal-summary" class="mono">none recorded</span></div>
+                  <p class="cal-warn" id="cal-drift" hidden></p>
+                  <button class="btn btn-outline btn-small btn-wide" id="btn-cal" title="Run a 2-port AutoCal with the ACM2202 at the sweep settings below">Calibrate…</button>
+                </div>
                 <hr class="divider" />
                 <div class="field-row">
                   <div class="control-group">

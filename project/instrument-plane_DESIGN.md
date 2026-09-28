@@ -6,10 +6,11 @@ container: cdocker
 ---
 # Instrument plane — design note
 
-**Nothing here is built.** This records a design conversation while the reasoning
-is fresh, so the decisions that matter get made deliberately rather than
-discovered halfway through an implementation. Treat the *Decisions* below as
-provisional until something is on the bench.
+**Partly built as of 2026-09-28** — see *What is built* at the foot of this
+note. The rest still records a design conversation while the reasoning is
+fresh, so the decisions that matter get made deliberately rather than
+discovered halfway through an implementation. Treat anything not listed under
+*What is built* as provisional until something is on the bench.
 
 The trigger: the chamber should be able to drive more than a VNA and a tower.
 The available inventory is several **B205minis**, a couple of **X310s**, an
@@ -188,3 +189,67 @@ than retrofitted. The RF-off invariant comes first regardless.
       work? The answer changes what gets built after the abstraction lands.
 - [ ] Absolute gain, or relative patterns only? Absolute needs a substitution
       measurement and a known standard.
+
+# What is built (2026-09-28)
+
+The seam, and nothing behind it yet. No radio has been on the bench; what
+exists is the contract a radio will plug into, and a way to run the whole
+application inside a one-channel receiver's limits so the seam is proved rather
+than asserted.
+
+**`Capabilities`** (`chamber_service.py`) is the `describe` half of the contract
+above, published in `get_state` beside `has_positioner`. Five fields, each one a
+question something actually branches on:
+
+| Field | Meaning |
+|---|---|
+| `parameters` | what `set_parameter` accepts — four for a VNA, one for a single-channel receiver |
+| `reflection` | whether any of it is reflection; the Smith chart and impedance readout have no meaning without it |
+| `calibration` | whether a SOLT/AutoCal exists to run at all |
+| `ratio` | whether a reading is referenced against its own source — *the ratio problem*, above |
+| `monitor` | whether that reference comes from a second channel on a coupler |
+
+Two profiles ship: `VNA_CAPS`, and `SCALAR_CAPS` for one channel wired to one
+path. The B205mini is `SCALAR_CAPS`. An X310 with a populated second slot is
+`SCALAR_CAPS` with `monitor=True` and `ratio=True` — which is the note's claim
+that **the second channel is the calibration**, written down as a flag the UI
+and the service can read.
+
+**Both roles are optional.** `HardwareBackend` took `with_positioner` already;
+it now takes `with_vna`, and `--no-vna` starts the service with a tower and no
+receiver. The receiver methods refuse through `_require_vna()` in words rather
+than an `AttributeError`, matching `_require_positioner`.
+
+**The service refuses what the receiver cannot do**, before starting work:
+`cmd_start_cal` on a receiver with no calibration, and `cmd_sweep` for
+parameters outside `caps.parameters`. Every scan and sweep on an unreferenced
+chain logs the ratio problem once, so the operator is told the shape is
+trustworthy and the level is not.
+
+**The dashboard degrades from the same block**, the way it already did for the
+tower: no cal wizard, no Sweep tab, no Smith chart, only the parameters the
+receiver offers, and the accordion section renames itself from *VNA* to
+*Receiver*.
+
+**`--sim-sdr`** runs the simulated rig declaring `SCALAR_CAPS`. It is not a
+USRP — the pattern behind it is the same synthetic one — but it is the same
+*shape* of instrument, which is what the layers above the driver have to cope
+with. This is deliberate, and it is the point: the fake is an endpoint, and the
+application can be developed against the limited case before a radio arrives,
+the same way `mock_instruments` let the VNA path be tested away from the rig.
+
+`rigcheck`'s `scalar_receiver` scenario pins the refusals and the ratio
+warning; `uicheck` restarts the service in `--sim-sdr` and asserts the UI stops
+offering what cannot be done.
+
+## What this does not do
+
+- **No receiver driver.** There is no `UsrpReceiver`. `HardwareBackend` still
+  composes exactly one real receiver, the VNA. Writing the driver is now
+  "implement the contract" rather than "refactor the application", which was
+  the whole point of doing this first.
+- **No Source role.** The AWG, the PA and the RF-off invariant are untouched.
+  The note's own advice stands: **build the RF-off invariant before any
+  measurement work**, and nothing here changes that.
+- **No ZMQ instrument plane.** The in-process path is what a scalar capture
+  needs; the socket boundary earns its place when there is real DSP behind it.

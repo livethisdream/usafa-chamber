@@ -513,6 +513,31 @@ def check_cal_unverified(r, outdir):
     return "unrecorded correction reported rather than trusted"
 
 
+def s_scalar_receiver():
+    # The floor every receiver is measured against: one channel, one path, no
+    # reflection, no calibration, no ratio. Everything above the driver has to
+    # work within that, and has to refuse what it cannot do in words rather
+    # than an AttributeError three layers down. Built before any radio is on
+    # the bench, deliberately - a seam proved only by the box that has not
+    # arrived yet is not a seam.
+    return {"_target": "scalar"}, []
+
+
+def check_scalar_receiver(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    caps = r["scalar"]["caps"]
+    assert caps["parameters"] == ["S21"], caps
+    assert not caps["reflection"] and not caps["calibration"], caps
+    assert "no calibration to run" in r["scalar"]["cal_refused"], (
+        f"a calibration was not refused readably: {r['scalar']['cal_refused']}")
+    assert "cannot measure" in r["scalar"]["sweep_refused"], (
+        f"reflection was not refused readably: {r['scalar']['sweep_refused']}")
+    assert r["scalar"]["scanned"], "a scalar receiver could not run a pattern"
+    assert any("not self-referencing" in m for m in r["scalar"]["logs"]), (
+        "an unreferenced chain measured without saying so")
+    return "scalar receiver scans; cal and reflection refused in words"
+
+
 def s_cal_error_surfaced():
     # The 2026-09-17 fault, reproduced: the cal is accepted, applies nothing,
     # and the only account of why is one line in the error queue. Reading that
@@ -689,6 +714,7 @@ SCENARIOS = [
     ("cal_error_surfaced", s_cal_error_surfaced, check_cal_error_surfaced),
     ("cal_characterization", s_cal_characterization, check_cal_characterization),
     ("cal_unverified", s_cal_unverified, check_cal_unverified),
+    ("scalar_receiver", s_scalar_receiver, check_scalar_receiver),
     ("cal_cancelled", s_cal_cancelled, check_cal_cancelled),
     ("sweep_nominal", s_sweep_nominal, check_sweep_nominal),
     ("sweep_vs_scan", s_sweep_vs_scan, check_sweep_vs_scan),
@@ -736,6 +762,8 @@ def _child(faults_json: str, argv: list[str]) -> int:
             rc = _run_sweep(argv)
         elif target == "service":
             rc = _run_service(argv)
+        elif target == "scalar":
+            rc = _run_scalar(argv)
         else:
             rc = pattern_measure.main(argv)
     except SystemExit as e:                     # argparse and friends
@@ -755,7 +783,66 @@ def _child(faults_json: str, argv: list[str]) -> int:
         "cleared": state.collection_cleared,
         "cal": _CAL_RESULT.copy(),
         "sweep": _SWEEP_RESULT.copy(),
+        "scalar": _SCALAR_RESULT.copy(),
     }), flush=True)
+    return 0
+
+
+_SCALAR_RESULT: dict = {}
+
+
+def _run_scalar(argv: list[str]) -> int:
+    """Drive the service with a one-channel receiver's capabilities.
+
+    The same synthetic rig, declaring what an SDR path declares: one parameter,
+    no reflection, no calibration, no ratio. What is under test is everything
+    above the driver - that a pattern still runs, that the two things it cannot
+    do are refused in words, and that an unreferenced chain says so.
+    """
+    import asyncio
+    import warnings
+
+    import chamber_service as cs
+
+    warnings.filterwarnings("ignore", message=r"coroutine .* was never awaited")
+
+    outdir = Path(argv[argv.index("--outdir") + 1])
+    cs.RUNS_DIR = outdir.parent
+
+    frames: list[dict] = []
+    loop = asyncio.new_event_loop()
+    try:
+        backend = cs.SimBackend(slew_deg_s=100000.0, caps=cs.SCALAR_CAPS)
+        svc = cs.ChamberService(backend, loop)
+        svc.push = frames.append
+
+        refused = {}
+        try:
+            svc.cmd_start_cal({})
+            refused["cal"] = ""
+        except cs.BackendError as e:
+            refused["cal"] = str(e)
+        try:
+            svc.cmd_sweep({"parameters": ["S11", "S21", "S12", "S22"]})
+            refused["sweep"] = ""
+        except cs.BackendError as e:
+            refused["sweep"] = str(e)
+
+        # The thing it *can* do has to keep working, or the seam has only
+        # proved that a limited receiver is a broken one.
+        svc._run_scan(cs.ScanRequest(start_deg=0.0, stop_deg=90.0,
+                                     step_deg=90.0, points=11,
+                                     name=outdir.name))
+        _SCALAR_RESULT.update({
+            "caps": svc.capabilities().as_dict(),
+            "cal_refused": refused["cal"],
+            "sweep_refused": refused["sweep"],
+            "scanned": any(f.get("type") == "scan_done" for f in frames),
+            "logs": [f.get("message", "") for f in frames
+                     if f.get("type") == "log"],
+        })
+    finally:
+        loop.close()
     return 0
 
 
@@ -1013,6 +1100,7 @@ def run_one(name: str, setup, check, verbose: bool) -> tuple[bool, str]:
              "cleared": payload.get("cleared", 0),
              "cal": payload.get("cal", {}),
              "sweep": payload.get("sweep", {}),
+             "scalar": payload.get("scalar", {}),
              "stops": payload.get("stops", []),
              "seeks": payload.get("seeks", []),
              "sweeps": payload.get("sweeps", 0),
