@@ -538,6 +538,45 @@ def check_scalar_receiver(r, outdir):
     return "scalar receiver scans; cal and reflection refused in words"
 
 
+def s_monitored_receiver():
+    # The other SDR configuration: a coupler on the source into a second
+    # receive channel, everything on one clock. What separates it from the
+    # scalar case is not what it can measure - both measure one path - but
+    # what the answer can be trusted for, so that is what this pins. The
+    # scalar receiver draws three warnings; this one draws only the span,
+    # which is a property of the request rather than of the chain.
+    return {"_target": "scalar"}, ["--monitored"]
+
+
+def check_monitored_receiver(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    caps = r["scalar"]["caps"]
+    assert caps["ratio"] and caps["monitor"] and caps["coherent"], caps
+    logs = " ".join(r["scalar"]["logs"])
+    assert "not self-referencing" not in logs, (
+        "a monitored chain was warned about source drift the monitor cancels")
+    assert "not phase-coherent" not in logs, (
+        "a chain on one clock was warned about phase it does keep")
+    assert r["scalar"]["scanned"], "a monitored receiver could not run a pattern"
+    return "monitored receiver scans; drift and phase warnings correctly silent"
+
+
+def s_narrow_receiver():
+    # A sweep wider than one capture is several captures. Magnitude survives
+    # that and phase does not, and the operator is told how many joins are in
+    # the answer rather than left to infer it from the sample rate.
+    return {"_target": "scalar"}, ["--wide-sweep"]
+
+
+def check_narrow_receiver(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    said = [m for m in r["scalar"]["logs"] if "retuned segments" in m]
+    assert said, "a sweep wider than the receiver measured without saying so"
+    assert "45 retuned segments" in said[0], (
+        f"the segment count is wrong: {said[0]}")
+    return said[0].split(" - ")[-1]
+
+
 def s_cal_error_surfaced():
     # The 2026-09-17 fault, reproduced: the cal is accepted, applies nothing,
     # and the only account of why is one line in the error queue. Reading that
@@ -715,6 +754,8 @@ SCENARIOS = [
     ("cal_characterization", s_cal_characterization, check_cal_characterization),
     ("cal_unverified", s_cal_unverified, check_cal_unverified),
     ("scalar_receiver", s_scalar_receiver, check_scalar_receiver),
+    ("monitored_receiver", s_monitored_receiver, check_monitored_receiver),
+    ("narrow_receiver", s_narrow_receiver, check_narrow_receiver),
     ("cal_cancelled", s_cal_cancelled, check_cal_cancelled),
     ("sweep_nominal", s_sweep_nominal, check_sweep_nominal),
     ("sweep_vs_scan", s_sweep_vs_scan, check_sweep_vs_scan),
@@ -812,7 +853,9 @@ def _run_scalar(argv: list[str]) -> int:
     frames: list[dict] = []
     loop = asyncio.new_event_loop()
     try:
-        backend = cs.SimBackend(slew_deg_s=100000.0, caps=cs.SCALAR_CAPS)
+        caps = (cs.X310_MONITOR_CAPS if "--monitored" in argv
+                else cs.SCALAR_CAPS)
+        backend = cs.SimBackend(slew_deg_s=100000.0, caps=caps)
         svc = cs.ChamberService(backend, loop)
         svc.push = frames.append
 
@@ -830,8 +873,13 @@ def _run_scalar(argv: list[str]) -> int:
 
         # The thing it *can* do has to keep working, or the seam has only
         # proved that a limited receiver is a broken one.
+        # 0.5-3 GHz is the span the rig actually sweeps, and the one a
+        # 56 MHz window has to be told it cannot take in one bite.
+        wide = "--wide-sweep" in argv
         svc._run_scan(cs.ScanRequest(start_deg=0.0, stop_deg=90.0,
                                      step_deg=90.0, points=11,
+                                     start_hz=0.5e9 if wide else 2.4e9,
+                                     stop_hz=3.0e9 if wide else 2.44e9,
                                      name=outdir.name))
         _SCALAR_RESULT.update({
             "caps": svc.capabilities().as_dict(),
