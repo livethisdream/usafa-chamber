@@ -114,10 +114,15 @@ def main(argv=None) -> int:
     # compare against the wrong data.
     shutil.rmtree(ROOT / "runs" / RUN_NAME, ignore_errors=True)
 
-    svc = subprocess.Popen(
-        [sys.executable, str(ROOT / "chamber_service.py"), "--sim",
-         "--port", str(a.ws_port)],
-        cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    def start_service(*extra: str) -> subprocess.Popen:
+        return subprocess.Popen(
+            [sys.executable, str(ROOT / "chamber_service.py"),
+             "--port", str(a.ws_port), *extra],
+            cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+
+    services: list[subprocess.Popen] = []
+    svc = start_service("--sim")
+    services.append(svc)
     http = subprocess.Popen(
         [sys.executable, "-m", "http.server", str(a.http_port),
          "--bind", "127.0.0.1", "--directory", str(dist)],
@@ -341,8 +346,12 @@ def main(argv=None) -> int:
                   page.inner_text("#cal-result"))
             page.click("#cal-cancel")
             page.wait_for_timeout(300)
+            # The point count is part of the record on purpose: seeing the
+            # cal's own points here is what stops the module's 1601-point
+            # characterization being read as the calibration's setup.
             check("cal record lands in the panel",
-                  page.inner_text("#cal-summary") != "none recorded",
+                  page.inner_text("#cal-summary") != "none recorded"
+                  and "pts" in page.inner_text("#cal-summary"),
                   page.inner_text("#cal-summary"))
 
             page.fill("#f-start", "5")
@@ -401,9 +410,43 @@ def main(argv=None) -> int:
             check("sidebar collapses", page.is_visible("#sidebar-icons")
                   and not page.is_visible("#accordionSettings"))
             page.screenshot(path=str(a.shots / "collapsed.png"))
+
+            # The other receiver. Same dashboard, same build, a backend that
+            # declares one channel and no calibration - which is what an SDR
+            # path declares. What is asserted is that the UI stops offering
+            # what cannot be done, rather than offering it and failing later.
+            page.click("#btn-toggle-settings-icon")
+            svc.terminate()
+            try:
+                svc.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                svc.kill()
+            sdr = start_service("--sim-sdr")
+            services.append(sdr)
+            if not wait_port(a.ws_port):
+                check("scalar receiver comes up", False, "service did not start")
+            else:
+                page.reload(wait_until="networkidle")
+                page.wait_for_timeout(1800)
+                check("scalar receiver comes up",
+                      page.inner_text("#mode-badge") != "",
+                      page.inner_text("#mode-badge"))
+                check("calibration hidden without one",
+                      not page.is_visible("#cal-panel"),
+                      "no cal wizard offered")
+                check("reflection hidden without it",
+                      not page.is_visible(".tab-btn[data-target='tab-sweep']"),
+                      "no Sweep tab offered")
+                offered = page.eval_on_selector_all(
+                    "#f-param option",
+                    "els => els.filter(e => !e.hidden).map(e => e.value)")
+                check("only measurable parameters offered",
+                      offered == ["S21"], ", ".join(offered))
+                page.screenshot(path=str(a.shots / "scalar-receiver.png"))
+
             browser.close()
     finally:
-        for proc in (svc, http):
+        for proc in (*services, http):
             proc.terminate()
             try:
                 proc.wait(timeout=8)

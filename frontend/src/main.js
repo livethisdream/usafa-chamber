@@ -36,6 +36,10 @@ const state = {
     // VNA-only capture. sweepData is keyed by S-parameter, each {re, im}.
     sweeping: false,
     hasPositioner: true,
+    // A VNA's answer until the service says otherwise, so a backend that
+    // predates the capability block behaves exactly as it always did.
+    caps: { parameters: ['S11', 'S21', 'S12', 'S22'], reflection: true,
+            calibration: true, ratio: true, monitor: false },
     sweepFreqs: [],
     sweepData: {},
     sweepMarker: 0,
@@ -727,10 +731,20 @@ function renderCalibration() {
         warn.hidden = true;
         return;
     }
+    // The point count earns its place beside the span: a calibration is solved
+    // at the sweep's own points, and seeing "101 pts" here is what stops the
+    // module's 1601-point characterization being read as the cal's setup.
     const span = `${(rec.sweep.start_hz / 1e9).toFixed(3)}–`
-               + `${(rec.sweep.stop_hz / 1e9).toFixed(3)} GHz`;
+               + `${(rec.sweep.stop_hz / 1e9).toFixed(3)} GHz`
+               + (rec.sweep.points ? `, ${rec.sweep.points} pts` : '');
     summary.textContent = `${calAgeText(rec)}, ${span}`
         + (rec.mode === 'sim' ? ' (simulated)' : '');
+    const chars = rec.module_characterization;
+    summary.title = chars
+        ? `Calibrated at the sweep above. The module itself is characterized `
+          + `${chars.start}–${chars.stop} at ${chars.points} points — its `
+          + `usable range, not this calibration's sweep.`
+        : '';
 
     const drift = calDrift(rec);
     if (drift.length) {
@@ -795,6 +809,8 @@ function applyState(s) {
         ? (s.pos_idn || '—') : 'not attached (--no-positioner)';
     $('pos-err').textContent = state.hasPositioner ? (s.latched_error ?? '—') : '—';
     applyPositionerPresence();
+    state.caps = s.capabilities || state.caps;
+    applyCapabilities();
     setCorrection(s.correction, s.mode);
     state.calibrating = !!s.calibrating;
     state.sweeping = !!s.sweeping;
@@ -837,6 +853,57 @@ function applyPositionerPresence() {
         $('btn-scan').title = 'The service was started with --no-positioner. '
                             + 'Sweeps work; nothing can turn the tower.';
     }
+}
+
+/**
+ * Hide what the installed receiver cannot do.
+ *
+ * The same move as applyPositionerPresence, for the other role. A one-channel
+ * SDR has no reflection to plot, no calibration to run and no second port to
+ * pick, and a dashboard that offers all three anyway is not a smaller problem
+ * than one that crashes - it is a larger one, because the operator finds out
+ * from the data rather than from the UI.
+ */
+function applyCapabilities() {
+    const c = state.caps || {};
+    const params = c.parameters || [];
+
+    // Calibration belongs to the instrument. No instrument, no wizard - and
+    // the whole block goes, rather than leaving a stranded "none recorded".
+    $('cal-panel').hidden = !c.calibration;
+
+    // The Smith chart and the impedance readout are reflection or nothing.
+    const refl = !!c.reflection;
+    document.querySelector('.tab-btn[data-target="tab-sweep"]').hidden = !refl;
+    $('chart-smith').hidden = !refl;
+    $('sweep-readout').hidden = !refl;
+
+    // Offer only the parameters the receiver actually measures.
+    for (const sel of [$('f-param'), $('sweep-params')]) {
+        if (!sel) continue;
+        for (const o of sel.options) {
+            o.hidden = o.value.split(',').some((p) => !params.includes(p));
+        }
+        if (sel.selectedOptions[0]?.hidden) {
+            const first = [...sel.options].find((o) => !o.hidden);
+            if (first) sel.value = first.value;
+        }
+    }
+
+    // The section is named after what is actually installed. Calling it VNA
+    // with no VNA behind it is a small lie, and the operator reading "VNA
+    // identity: none" is entitled to wonder which of the two is broken.
+    $('rx-label').textContent = c.calibration && refl ? 'VNA' : 'Receiver';
+
+    // The ratio problem, stated where the number is read rather than only in
+    // the log: a chain with nothing cancelling source drift has a trustworthy
+    // shape and an untrustworthy level.
+    const unref = c.ratio === false && c.monitor === false;
+    $('stat-peak').title = unref
+        ? 'This receiver is not self-referencing and has no monitor channel. '
+        + 'Source drift does not cancel, so pattern shape is meaningful but '
+        + 'absolute level is not.'
+        : '';
 }
 
 function syncControls() {

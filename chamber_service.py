@@ -191,12 +191,108 @@ def cal_mismatch(record: dict | None, req) -> list[str]:
     return out
 
 
+def cal_unverified(record: dict | None, correction: str | None) -> str | None:
+    """Why a correction reading ON still cannot be vouched for, or None.
+
+    The dashboard can see *that* the instrument is corrected - CORR:STAT? says
+    so, and the pill goes green on it - but not what sweep the correction was
+    solved at, unless it ran the calibration itself. A calibration performed in
+    the VNA's own software leaves no record here, so cal_mismatch has nothing
+    to compare against and returns empty: "no calibration to disagree with".
+
+    That silence is the wrong answer in the one case where it matters most.
+    Every run configures the sweep before measuring, and setting the sweep is
+    exactly what invalidates a calibration - so an unrecorded cal is the state
+    where the instrument is most likely to be quietly interpolating, and the
+    state the operator is least likely to suspect, because the pill says cal.
+    """
+    if pm.correction_is_on(correction) is not True:
+        return None          # off or unknown - correction_state already says so
+    if record:
+        return None          # cal_mismatch owns the recorded case
+    return ("error correction is ON, but no calibration was taken through this "
+            "dashboard - the sweep it was solved at is unknown, and setting "
+            "this run's sweep may already have invalidated it")
+
+
+def unreferenced_warning(caps: "Capabilities") -> str | None:
+    """Why an uncalibrated reading from this receiver means less than a VNA's.
+
+    A VNA hands back a ratio: S21 is divided by its own source, so drift in the
+    source cancels and the number survives being uncalibrated. A source into an
+    amplifier into an antenna into a separate receiver has drift at every stage
+    and nothing cancelling it, so the same trace is only as stable as the whole
+    chain. A monitor channel on a coupler restores the ratio; without one, the
+    honest thing is to say the shape is trustworthy and the level is not.
+    """
+    if caps.ratio:
+        return None
+    if caps.monitor:
+        return None          # the monitor channel is the ratio
+    return ("this receiver is not self-referencing and has no monitor channel "
+            "- source drift does not cancel, so relative pattern shape is "
+            "meaningful but level is not")
+
+
 # --------------------------------------------------------------------------
 # Backends
 # --------------------------------------------------------------------------
 
 class BackendError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class Capabilities:
+    """What the installed receiver can actually do.
+
+    Published in get_state so neither the service nor the dashboard has to
+    guess from which backend is loaded. `has_positioner` already worked this
+    way and is the model: the tower's absence degrades the UI rather than
+    erroring it, and a receiver that cannot calibrate deserves the same
+    treatment instead of an AttributeError three layers down.
+
+    The fields are the questions something actually branches on:
+
+    `parameters`  what set_parameter accepts. A VNA takes four; a one-channel
+                  SDR measures the path it is wired to and nothing else.
+    `reflection`  whether any of that is reflection - the Smith chart and the
+                  impedance readout have no meaning without it.
+    `calibration` whether a SOLT/AutoCal exists to be run at all.
+    `ratio`       whether a reading is referenced against its own source. This
+                  is the quiet thing a VNA provides: S21 divides by the source,
+                  so source drift cancels and an uncalibrated number still
+                  means something. A bare SDR has drift in every stage and
+                  nothing cancelling it.
+    `monitor`     whether that reference comes from a second receive channel
+                  watching a coupler on the source. An X310 with a populated
+                  second slot can; a B205mini cannot, which is the whole
+                  argument for the bigger box.
+    """
+
+    parameters: tuple[str, ...] = ("S11", "S21", "S12", "S22")
+    reflection: bool = True
+    calibration: bool = True
+    ratio: bool = True
+    monitor: bool = False
+
+    def as_dict(self) -> dict:
+        return {"parameters": list(self.parameters),
+                "reflection": self.reflection,
+                "calibration": self.calibration,
+                "ratio": self.ratio,
+                "monitor": self.monitor}
+
+
+# A VNA: four parameters, reflection, a cal module, and self-referencing.
+VNA_CAPS = Capabilities()
+
+# One receive channel wired to one path. No reflection without a coupler, no
+# SOLT to run, and nothing cancelling source drift. The floor every other
+# receiver is measured against - if the app works on this, it works on all of
+# them.
+SCALAR_CAPS = Capabilities(parameters=("S21",), reflection=False,
+                           calibration=False, ratio=False, monitor=False)
 
 
 class SimBackend:
@@ -210,10 +306,15 @@ class SimBackend:
 
     mode = "sim"
 
-    def __init__(self, slew_deg_s: float = 60.0):
+    def __init__(self, slew_deg_s: float = 60.0,
+                 caps: Capabilities = VNA_CAPS):
         self._angle = 0.0
         self._speed = 100.0
         self._slew = slew_deg_s
+        self._caps = caps
+
+    def capabilities(self) -> Capabilities:
+        return self._caps
 
     # -- identity / state ---------------------------------------------------
     def vna_idn(self) -> str:
@@ -238,6 +339,11 @@ class SimBackend:
 
     def acm_module(self) -> str | None:
         return "SIMULATED AutoCal module (no hardware)"
+
+    def acm_characterization(self) -> dict | None:
+        # The shape a real ACM2202.1 reports, so the label the cal log writes
+        # is exercised in sim rather than only on the rig.
+        return {"start": "100 kHz", "stop": "22 GHz", "points": 1601}
 
     def calibrate(self, req: "CalRequest", on_step=None,
                   should_stop=None) -> str:
@@ -352,7 +458,8 @@ class HardwareBackend:
     def __init__(self, vna_resource: str | None = None,
                  pos_resource: str | None = None,
                  slot: int | None = None, device: str | None = None,
-                 with_positioner: bool = True):
+                 with_positioner: bool = True,
+                 with_vna: bool = True):
         import pyvisa
         self._rm = pyvisa.ResourceManager()
         vcfg = pm.VnaConfig()
@@ -368,13 +475,22 @@ class HardwareBackend:
             cmds.device = device
 
         self._vcfg = vcfg
-        self.vna = pm.Vna(self._rm, vcfg)
-        # A bench with only the VNA on it is a real configuration - a VNA-only
-        # capture never addresses the tower - so the positioner is optional.
-        # Asked for explicitly, never inferred: falling back to "no tower"
-        # because the EMCenter happened not to answer is how a pattern run
-        # turns into 72 sweeps of the same angle.
+        # Receiver and positioner are both roles, and both optional. A bench
+        # with only the VNA on it is a real configuration - a VNA-only capture
+        # never addresses the tower - and so is a bench with no VNA at all,
+        # once an SDR is the receiver. Each is asked for explicitly and never
+        # inferred: falling back to "no tower" because the EMCenter happened
+        # not to answer is how a pattern run turns into 72 sweeps of the same
+        # angle, and the same reasoning applies to the receiver.
+        self.vna = pm.Vna(self._rm, vcfg) if with_vna else None
         self.pos = pm.Positioner(self._rm, pcfg, cmds) if with_positioner else None
+
+    def capabilities(self) -> Capabilities:
+        # Only the VNA receiver exists so far. A receiver that is absent can do
+        # nothing, which is the honest answer and the one the UI can act on.
+        return VNA_CAPS if self.vna else Capabilities(
+            parameters=(), reflection=False, calibration=False,
+            ratio=False, monitor=False)
 
     @property
     def has_positioner(self) -> bool:
@@ -387,8 +503,15 @@ class HardwareBackend:
                 "--no-positioner, so nothing can turn the tower")
         return self.pos
 
-    def vna_idn(self) -> str:
-        return self.vna.idn()
+    def _require_vna(self):
+        if self.vna is None:
+            raise BackendError(
+                "no receiver attached - the service was started with --no-vna, "
+                "so there is nothing to measure with")
+        return self.vna
+
+    def vna_idn(self) -> str | None:
+        return self.vna.idn() if self.vna else None
 
     def pos_idn(self) -> str | None:
         return self.pos.identity() if self.pos else None
@@ -403,10 +526,16 @@ class HardwareBackend:
         return self.pos.latched_error() if self.pos else None
 
     def correction_state(self) -> str:
-        return self.vna.correction_state()
+        # No receiver is not "uncalibrated"; it is "there is nothing to
+        # calibrate". correction_is_on reads an unrecognised string as unknown,
+        # which is the right answer here.
+        return self.vna.correction_state() if self.vna else "n/a (no receiver)"
 
     def acm_module(self) -> str | None:
-        return self.vna.acm_module()
+        return self.vna.acm_module() if self.vna else None
+
+    def acm_characterization(self) -> dict | None:
+        return self.vna.acm_characterization() if self.vna else None
 
     def calibrate(self, req: "CalRequest", on_step=None,
                   should_stop=None) -> str:
@@ -418,6 +547,7 @@ class HardwareBackend:
         else - a running AutoCal cannot be interrupted, and a button that
         claimed otherwise would be worse than no button.
         """
+        self._require_vna()
         self.configure(req.as_scan())
         if should_stop is not None and should_stop():
             raise pm.Aborted("calibration stopped before it began")
@@ -441,25 +571,27 @@ class HardwareBackend:
         return self._require_positioner().seek(deg, should_abort=should_abort)
 
     def set_parameter(self, parameter: str) -> None:
-        self.vna.set_parameter(parameter)
+        self._require_vna().set_parameter(parameter)
 
     def configure(self, req: ScanRequest) -> None:
         k = self._vcfg
         k.start_hz, k.stop_hz = req.start_hz, req.stop_hz
         k.points, k.if_bw_hz = req.points, req.if_bw_hz
         k.power_dbm, k.parameter = req.power_dbm, req.parameter
-        self.vna.cfg = k
-        self.vna.configure()
+        vna = self._require_vna()
+        vna.cfg = k
+        vna.configure()
 
     def frequencies(self) -> np.ndarray:
-        return self.vna.frequencies()
+        return self._require_vna().frequencies()
 
     def measure(self) -> np.ndarray:
-        return self.vna.measure()
+        return self._require_vna().measure()
 
     def close(self) -> None:
         try:
-            self.vna.close()
+            if self.vna:
+                self.vna.close()
         finally:
             if self.pos:
                 self.pos.close()
@@ -527,11 +659,23 @@ class ChamberService:
     def sweeping(self) -> bool:
         return self._sweep_worker is not None and self._sweep_worker.is_alive()
 
+    def capabilities(self) -> Capabilities:
+        """What the installed receiver can do, defaulting to a VNA's answer.
+
+        The default matters for backends written before this existed: assuming
+        full capability keeps them working exactly as they did, and a receiver
+        that is actually limited says so rather than being guessed at.
+        """
+        get = getattr(self.backend, "capabilities", None)
+        return get() if get else VNA_CAPS
+
     def get_state(self) -> dict:
         has_pos = getattr(self.backend, "has_positioner", True)
+        caps = self.capabilities()
         st = {"mode": self.backend.mode, "scanning": self.scanning,
               "calibrating": self.calibrating, "sweeping": self.sweeping,
-              "calibration": self.calibration, "has_positioner": has_pos}
+              "calibration": self.calibration, "has_positioner": has_pos,
+              "capabilities": caps.as_dict()}
         try:
             st.update({
                 "vna_idn": self.backend.vna_idn(),
@@ -661,6 +805,10 @@ class ChamberService:
 
     def cmd_start_cal(self, a: dict) -> dict:
         self._require_idle()
+        if not self.capabilities().calibration:
+            raise BackendError(
+                "this receiver has no calibration to run - error correction "
+                "belongs to the instrument, and nothing here provides it")
         req = CalRequest.from_args(a)
         self._cal_cancel.clear()
         self._cal_worker = threading.Thread(target=self._run_cal, args=(req,),
@@ -686,6 +834,12 @@ class ChamberService:
     def cmd_sweep(self, a: dict) -> dict:
         self._require_idle()
         req = SweepRequest.from_args(a)
+        caps = self.capabilities()
+        unsupported = [p for p in req.parameters if p not in caps.parameters]
+        if unsupported:
+            raise BackendError(
+                f"this receiver cannot measure {', '.join(unsupported)} - it "
+                f"offers {', '.join(caps.parameters) or 'nothing'}")
         self._sweep_cancel.clear()
         self._sweep_worker = threading.Thread(
             target=self._run_sweep, args=(req,), daemon=True,
@@ -740,6 +894,12 @@ class ChamberService:
             if corr_on is False:
                 self.log("warn", "vna", f"error correction is OFF ({correction}) "
                                         f"- this sweep is uncalibrated")
+            unverified = cal_unverified(self.calibration, correction)
+            if unverified:
+                self.log("warn", "vna", unverified)
+            unreferenced = unreferenced_warning(self.capabilities())
+            if unreferenced:
+                self.log("warn", "rx", unreferenced)
 
             for i, parameter in enumerate(req.parameters):
                 if self._sweep_cancel.is_set():
@@ -791,6 +951,17 @@ class ChamberService:
                         "the ACM's USB connection, and see whether this build "
                         "exposes AutoCal to SCPI at all")
                 self.push({"type": "cal_step", "message": f"module: {module}"})
+                # Said in full, and said as a module property. These three
+                # numbers look exactly like a sweep setup, and read as one they
+                # suggest the VNA calibrates its whole range every time. It does
+                # not: the cal runs at this run's sweep, printed just below.
+                chars = self.backend.acm_characterization()
+                if chars:
+                    self.log("info", "cal",
+                             f"module characterized {chars['start']}-"
+                             f"{chars['stop']} at {chars['points']} pts "
+                             f"- the module's own range, not this "
+                             f"calibration's sweep")
                 state = self.backend.calibrate(req, on_step=step,
                                                should_stop=self._cal_cancel.is_set)
 
@@ -800,6 +971,7 @@ class ChamberService:
                       "ports": list(req.ports),
                       "reference_plane": req.reference_plane,
                       "module": module,
+                      "module_characterization": chars,
                       "mode": self.backend.mode,
                       "sweep": req.sweep(),
                       "correction_state": state}
@@ -871,6 +1043,12 @@ class ChamberService:
                 self.log("warn", "vna",
                          "this run does not match the calibration: "
                          + "; ".join(drift))
+            unverified = cal_unverified(self.calibration, correction)
+            if unverified:
+                self.log("warn", "vna", unverified)
+            unreferenced = unreferenced_warning(self.capabilities())
+            if unreferenced:
+                self.log("warn", "rx", unreferenced)
 
             self.push({"type": "scan_started", "name": name,
                        "angles": angles.tolist(), "freqs": freqs.tolist(),
@@ -1057,14 +1235,25 @@ async def serve(service: ChamberService, port: int) -> None:
 
 
 def build_backend(a) -> Any:
+    if getattr(a, "sim_sdr", False):
+        # A one-channel receiver's capabilities on the simulated rig. Not a
+        # USRP - it is the same synthetic pattern - but it is the same *shape*
+        # of instrument: one path, no reflection, no calibration, no ratio. The
+        # point is to develop and test everything above the driver against the
+        # limited case before any radio is on the bench, the way the fake
+        # instruments let the VNA path be tested away from the rig.
+        print("backend: SIMULATED, scalar receiver (forced with --sim-sdr)")
+        return SimBackend(caps=SCALAR_CAPS)
     if a.sim:
         print("backend: SIMULATED (forced with --sim)")
         return SimBackend()
     try:
         b = HardwareBackend(a.vna, a.pos, a.slot, a.device,
-                            with_positioner=not a.no_positioner)
+                            with_positioner=not a.no_positioner,
+                            with_vna=not getattr(a, "no_vna", False))
         pos = b.pos_idn() if b.has_positioner else "none (--no-positioner)"
-        print(f"backend: hardware\n  VNA {b.vna_idn()}\n  POS {pos}")
+        vna = b.vna_idn() or "none (--no-vna)"
+        print(f"backend: hardware\n  VNA {vna}\n  POS {pos}")
         return b
     except pm.InstrumentUnavailable as e:
         # These carry an instruction, not just a status code. Print the
@@ -1091,6 +1280,12 @@ def main(argv=None) -> int:
                    help="use the simulated backend; no instruments required")
     p.add_argument("--no-fallback", action="store_true",
                    help="fail instead of falling back to the simulator")
+    p.add_argument("--sim-sdr", action="store_true",
+                   help="simulated rig with a one-channel receiver's "
+                        "capabilities: no reflection, no calibration, no "
+                        "ratio - what an SDR path has to work within")
+    p.add_argument("--no-vna", action="store_true",
+                   help="start without a receiver; the tower still works")
     p.add_argument("--no-positioner", action="store_true",
                    help="VNA only: do not open the positioner at all. Sweeps "
                         "work, scans and jogs are refused. Asked for "
