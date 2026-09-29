@@ -234,6 +234,57 @@ def unreferenced_warning(caps: "Capabilities") -> str | None:
             "meaningful but level is not")
 
 
+def phase_warning(caps: "Capabilities") -> str | None:
+    """Why the phase column of a pattern may not mean what it looks like.
+
+    Every run writes `phase_deg` because the VNA path always had something
+    real to put there. A chain whose captures are not phase-comparable still
+    fills the column - each value is what was measured - but the relationship
+    between one angle and the next is not a property of the antenna. Magnitude
+    is unaffected, which is why this is a warning and not a refusal: a power
+    pattern off such a chain is perfectly good, and only the phase is not.
+    """
+    if caps.coherent:
+        return None
+    return ("this receiver is not phase-coherent between captures - pattern "
+            "magnitude is unaffected, but the phase column does not relate "
+            "one angle to the next and should not be transformed")
+
+
+def span_warning(caps: "Capabilities", req) -> str | None:
+    """Why a sweep wider than one capture is not one measurement.
+
+    A VNA steps its own synthesizer across whatever span it is given. An SDR
+    digitizes a window, so a wider request is several captures at different
+    centre frequencies - which is fine for magnitude and not fine for phase,
+    because retuning leaves the LO at an arbitrary phase and the segments no
+    longer share one reference.
+    """
+    if caps.span_hz is None:
+        return None
+    span = abs(float(req.stop_hz) - float(req.start_hz))
+    if span <= caps.span_hz:
+        return None
+    segments = math.ceil(span / caps.span_hz)
+    return (f"this sweep spans {span / 1e6:.0f} MHz and the receiver captures "
+            f"{caps.span_hz / 1e6:.0f} MHz at a time - it is taken in "
+            f"{segments} retuned segments, and phase does not carry across "
+            f"the joins")
+
+
+def receiver_warnings(caps: "Capabilities", req) -> list[str]:
+    """Everything worth saying about this receiver before it measures.
+
+    Gathered in one place because the scan path and the sweep path have to say
+    the same things, and two lists drift. Each is a limit of the chain rather
+    than a fault in it, so all of them are warnings and none refuses the run:
+    what they buy the operator is knowing which parts of the answer to trust.
+    """
+    return [w for w in (unreferenced_warning(caps),
+                        phase_warning(caps),
+                        span_warning(caps, req)) if w]
+
+
 # --------------------------------------------------------------------------
 # Backends
 # --------------------------------------------------------------------------
@@ -268,6 +319,20 @@ class Capabilities:
                   watching a coupler on the source. An X310 with a populated
                   second slot can; a B205mini cannot, which is the whole
                   argument for the bigger box.
+    `coherent`    whether phase is comparable *between* captures, and so
+                  whether the phase column of a pattern means anything from
+                  one angle to the next. Magnitude survives a chain that this
+                  is false for; a near-field transform does not.
+    `span_hz`     how much spectrum one capture covers, or None for an
+                  instrument that sweeps its own range. A VNA steps its
+                  synthesizer and hands back the whole span; an SDR digitizes
+                  a window, and a wider request has to be taken in retuned
+                  segments.
+
+    These describe the *installed configuration*, not what the box is capable
+    of. An X310 with two daughterboards and no coupler on the source has no
+    monitor channel and no ratio, and is a B205mini as far as anything here is
+    concerned. Capability that is not wired up is not capability.
     """
 
     parameters: tuple[str, ...] = ("S11", "S21", "S12", "S22")
@@ -275,13 +340,17 @@ class Capabilities:
     calibration: bool = True
     ratio: bool = True
     monitor: bool = False
+    coherent: bool = True
+    span_hz: float | None = None
 
     def as_dict(self) -> dict:
         return {"parameters": list(self.parameters),
                 "reflection": self.reflection,
                 "calibration": self.calibration,
                 "ratio": self.ratio,
-                "monitor": self.monitor}
+                "monitor": self.monitor,
+                "coherent": self.coherent,
+                "span_hz": self.span_hz}
 
 
 # A VNA: four parameters, reflection, a cal module, and self-referencing.
@@ -292,7 +361,27 @@ VNA_CAPS = Capabilities()
 # receiver is measured against - if the app works on this, it works on all of
 # them.
 SCALAR_CAPS = Capabilities(parameters=("S21",), reflection=False,
-                           calibration=False, ratio=False, monitor=False)
+                           calibration=False, ratio=False, monitor=False,
+                           coherent=False, span_hz=56e6)
+
+# An X310 with both slots populated, a coupler on the source, and the second
+# receive channel watching it. The design note's "the second channel is the
+# calibration", wired: the monitor restores the ratio a VNA gives for free, so
+# source drift cancels and level means something again. Everything in the
+# chassis shares a clock, so phase is comparable between captures.
+#
+# The span is the UBX-160's, and it is the field most likely to be wrong for
+# somebody else's rig: it is the daughterboard's width, not the X310's, and
+# the host network has to carry it - over 1 GbE the usable rate collapses to a
+# fraction of this and the number here becomes a lie. Check the link before
+# believing it.
+#
+# Wiring, not inventory. The same chassis without the coupler is SCALAR_CAPS
+# with a wider span - two channels that are not ratioed are one channel and a
+# spare.
+X310_MONITOR_CAPS = Capabilities(parameters=("S21",), reflection=False,
+                                 calibration=False, ratio=True, monitor=True,
+                                 coherent=True, span_hz=160e6)
 
 
 class SimBackend:
@@ -897,9 +986,8 @@ class ChamberService:
             unverified = cal_unverified(self.calibration, correction)
             if unverified:
                 self.log("warn", "vna", unverified)
-            unreferenced = unreferenced_warning(self.capabilities())
-            if unreferenced:
-                self.log("warn", "rx", unreferenced)
+            for w in receiver_warnings(self.capabilities(), req):
+                self.log("warn", "rx", w)
 
             for i, parameter in enumerate(req.parameters):
                 if self._sweep_cancel.is_set():
@@ -1046,9 +1134,8 @@ class ChamberService:
             unverified = cal_unverified(self.calibration, correction)
             if unverified:
                 self.log("warn", "vna", unverified)
-            unreferenced = unreferenced_warning(self.capabilities())
-            if unreferenced:
-                self.log("warn", "rx", unreferenced)
+            for w in receiver_warnings(self.capabilities(), req):
+                self.log("warn", "rx", w)
 
             self.push({"type": "scan_started", "name": name,
                        "angles": angles.tolist(), "freqs": freqs.tolist(),
@@ -1235,6 +1322,15 @@ async def serve(service: ChamberService, port: int) -> None:
 
 
 def build_backend(a) -> Any:
+    if getattr(a, "sim_sdr_monitor", False):
+        # The other end of the SDR range: two channels, one of them watching a
+        # coupler on the source, everything sharing a clock. Worth simulating
+        # separately from --sim-sdr because the two differ in what they can be
+        # trusted for, not in what they can do, and that difference is exactly
+        # what the warnings exist to say.
+        print("backend: SIMULATED, monitored coherent receiver "
+              "(forced with --sim-sdr-monitor)")
+        return SimBackend(caps=X310_MONITOR_CAPS)
     if getattr(a, "sim_sdr", False):
         # A one-channel receiver's capabilities on the simulated rig. Not a
         # USRP - it is the same synthetic pattern - but it is the same *shape*
@@ -1284,6 +1380,10 @@ def main(argv=None) -> int:
                    help="simulated rig with a one-channel receiver's "
                         "capabilities: no reflection, no calibration, no "
                         "ratio - what an SDR path has to work within")
+    p.add_argument("--sim-sdr-monitor", action="store_true",
+                   help="simulated rig with a monitored, phase-coherent "
+                        "receiver's capabilities: still no reflection and no "
+                        "calibration, but the ratio is restored")
     p.add_argument("--no-vna", action="store_true",
                    help="start without a receiver; the tower still works")
     p.add_argument("--no-positioner", action="store_true",

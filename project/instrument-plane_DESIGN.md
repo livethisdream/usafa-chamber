@@ -182,7 +182,17 @@ than retrofitted. The RF-off invariant comes first regardless.
 # Open questions
 
 - [ ] Does the PA have a control interface, or is it a bias line and a switch?
-- [ ] Are both X310s populated with matching daughterboards?
+- [x] Are both X310s populated with matching daughterboards? **UBX-160**,
+      confirmed 2026-09-29. 10 MHz – 6 GHz, 160 MHz per channel, one TX and
+      one RX each — so two slots give two of each, and the monitor channel is
+      available today rather than a purchase.
+- [ ] Does the host have a **10 GbE** path to the X310? `span_hz=160e6` assumes
+      it. Over 1 GbE the usable rate collapses to a fraction of that and the
+      number in the profile becomes a lie — it is the field most likely to be
+      wrong for somebody else's rig.
+- [ ] Does the installed UHD expose **LO sharing** on this UBX revision? Needed
+      for phase coherence *across* the two daughterboards, not just within one.
+      `coherent=True` in `X310_MONITOR_CAPS` assumes it.
 - [ ] Do the B205minis on hand expose any external reference input?
 - [ ] Which measurement is actually wanted first — scalar power patterns,
       modulated-waveform performance vs angle, or a second emitter for nulling
@@ -209,11 +219,36 @@ question something actually branches on:
 | `ratio` | whether a reading is referenced against its own source — *the ratio problem*, above |
 | `monitor` | whether that reference comes from a second channel on a coupler |
 
-Two profiles ship: `VNA_CAPS`, and `SCALAR_CAPS` for one channel wired to one
-path. The B205mini is `SCALAR_CAPS`. An X310 with a populated second slot is
-`SCALAR_CAPS` with `monitor=True` and `ratio=True` — which is the note's claim
-that **the second channel is the calibration**, written down as a flag the UI
-and the service can read.
+Three profiles ship: `VNA_CAPS`; `SCALAR_CAPS` for one channel wired to one
+path (the B205mini); and `X310_MONITOR_CAPS` — two slots populated, a coupler
+on the source, the second channel watching it, everything on one clock. That
+last one is this note's claim that **the second channel is the calibration**,
+written down as flags the UI and the service can read.
+
+Two further fields were added once the X310 was the target, because they are
+what actually separates the two SDR configurations:
+
+| Field | Meaning |
+|---|---|
+| `coherent` | whether phase is comparable *between* captures, and so whether a pattern's phase column relates one angle to the next |
+| `span_hz` | how much spectrum one capture covers, or `None` for an instrument that sweeps its own range |
+
+Neither refuses a run. Both are limits of the chain rather than faults in it,
+so what they buy the operator is knowing which part of the answer to trust —
+`receiver_warnings()` gathers all three (drift, phase, span) in one place so
+the scan path and the sweep path cannot drift apart in what they say.
+
+Against the 0.5–3 GHz span the rig actually sweeps, the three profiles read:
+
+| | drift | phase | span |
+|---|---|---|---|
+| VNA | — | — | — |
+| B205mini | warns | warns | 45 retuned segments |
+| X310 + monitor | — | — | 16 retuned segments |
+
+**Wiring, not inventory.** These describe the installed configuration, not what
+the box could do. The same X310 without the coupler is `SCALAR_CAPS` with a
+wider span: two channels that are not ratioed are one channel and a spare.
 
 **Both roles are optional.** `HardwareBackend` took `with_positioner` already;
 it now takes `with_vna`, and `--no-vna` starts the service with a tower and no
@@ -231,16 +266,19 @@ tower: no cal wizard, no Sweep tab, no Smith chart, only the parameters the
 receiver offers, and the accordion section renames itself from *VNA* to
 *Receiver*.
 
-**`--sim-sdr`** runs the simulated rig declaring `SCALAR_CAPS`. It is not a
+**`--sim-sdr`** and **`--sim-sdr-monitor`** run the simulated rig declaring
+`SCALAR_CAPS` and `X310_MONITOR_CAPS` respectively. It is not a
 USRP — the pattern behind it is the same synthetic one — but it is the same
 *shape* of instrument, which is what the layers above the driver have to cope
 with. This is deliberate, and it is the point: the fake is an endpoint, and the
 application can be developed against the limited case before a radio arrives,
 the same way `mock_instruments` let the VNA path be tested away from the rig.
 
-`rigcheck`'s `scalar_receiver` scenario pins the refusals and the ratio
-warning; `uicheck` restarts the service in `--sim-sdr` and asserts the UI stops
-offering what cannot be done.
+`rigcheck` pins all of it: `scalar_receiver` (the refusals and the warnings),
+`monitored_receiver` (the drift and phase warnings correctly *silent* — the
+control for the one above, the way `split_unguarded` controls `split_reply`),
+and `narrow_receiver` (the segment count). `uicheck` restarts the service in
+`--sim-sdr` and asserts the UI stops offering what cannot be done.
 
 ## What this does not do
 
