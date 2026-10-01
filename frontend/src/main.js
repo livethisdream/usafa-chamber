@@ -1272,9 +1272,9 @@ function db(re, im) {
 /**
  * Load impedance behind a reflection coefficient: Z = Z0 (1 + G) / (1 - G).
  *
- * A short is G = -1, where the denominator is zero and Z is genuinely zero, so
- * the singular case is real rather than a rounding artefact and is reported as
- * such instead of as Infinity.
+ * An open is G = +1, where the denominator is zero and Z is genuinely
+ * infinite, so the singular case is real rather than a rounding artefact and
+ * is reported as such. (A short, G = -1, is Z = 0 and is not singular.)
  */
 function gammaToZ(re, im) {
     const dr = 1 - re, di = -im;
@@ -1285,6 +1285,26 @@ function gammaToZ(re, im) {
         r: Z0 * (nr * dr + ni * di) / den,
         x: Z0 * (ni * dr - nr * di) / den,
     };
+}
+
+/**
+ * Smith-chart coordinates for a run of reflection coefficients.
+ *
+ * Plotly's scattersmith takes `real`/`imag` as NORMALIZED IMPEDANCE,
+ * z = Z / Z0 = (1 + G) / (1 - G), with z = 1 + j0 at the center -- not G. Fed
+ * G directly, every point lands at z = G: a perfect match (G = 0) is drawn on
+ * the short-circuit point at the left edge, and a 62 ohm load reads as about
+ * 5 ohm off the grid. An open (G = +1) has no finite z and is left as a gap.
+ */
+function gammaToSmith(re, im) {
+    const real = [], imag = [];
+    for (let k = 0; k < re.length; k++) {
+        const z = gammaToZ(re[k], im[k]);
+        const ok = Number.isFinite(z.r) && Number.isFinite(z.x);
+        real.push(ok ? z.r / Z0 : null);
+        imag.push(ok ? z.x / Z0 : null);
+    }
+    return { real, imag };
 }
 
 function fmtOhms(z) {
@@ -1324,11 +1344,14 @@ function redrawSweep() {
     // Smith: reflection parameters plus the marker point.
     const i = state.sweepMarker;
     const primary = state.sweepData.S11 || state.sweepData.S22;
+    const traces = REFLECTION.map((n) => {
+        const d = state.sweepData[n];
+        return d ? gammaToSmith(d.re, d.im) : { real: [], imag: [] };
+    }).concat([primary ? gammaToSmith([primary.re[i]], [primary.im[i]])
+                       : { real: [], imag: [] }]);
     Plotly.update('chart-smith', {
-        real: REFLECTION.map((n) => (state.sweepData[n] || { re: [] }).re)
-            .concat([primary ? [primary.re[i]] : []]),
-        imag: REFLECTION.map((n) => (state.sweepData[n] || { im: [] }).im)
-            .concat([primary ? [primary.im[i]] : []]),
+        real: traces.map((t) => t.real),
+        imag: traces.map((t) => t.imag),
     }, {}, [0, 1, 2]);
 
     renderSweepReadout();
