@@ -686,6 +686,129 @@ class HardwareBackend:
                 self.pos.close()
 
 
+class UsrpBackend:
+    """A USRP as the receiver, with the same tower underneath.
+
+    Composed the way HardwareBackend is: the positioner is the project's
+    existing driver, untouched, and only the receiver changes. The calibration
+    methods are present and refuse, because the contract has them and a
+    receiver with no calibration should say so in words rather than be missing
+    an attribute - which is the distinction `capabilities()` exists to publish
+    ahead of time so nothing has to find out this way.
+    """
+
+    mode = "usrp"
+
+    def __init__(self, usrp_args: str, pos_resource: str | None = None,
+                 slot: int | None = None, device: str | None = None,
+                 with_positioner: bool = True, allow_tx: bool = False,
+                 rate_hz: float = 200e6, monitor_chan: int | None = None,
+                 ref: str = "internal"):
+        import pyvisa
+
+        import usrp_receiver as ur
+
+        self._rm = pyvisa.ResourceManager()
+        pcfg = pm.PositionerConfig()
+        if pos_resource:
+            pcfg.resource = pos_resource
+        cmds = pm.PositionerCmds()
+        if slot is not None:
+            cmds.slot = slot
+        if device:
+            cmds.device = device
+
+        self.rx = ur.UsrpReceiver(
+            ur.UsrpConfig(args=usrp_args, rate_hz=rate_hz, ref=ref,
+                          monitor_chan=monitor_chan),
+            allow_tx=allow_tx)
+        self.pos = pm.Positioner(self._rm, pcfg, cmds) if with_positioner else None
+
+    def capabilities(self) -> Capabilities:
+        d = self.rx.capabilities_dict()
+        return Capabilities(**d)
+
+    @property
+    def has_positioner(self) -> bool:
+        return self.pos is not None
+
+    def _require_positioner(self):
+        if self.pos is None:
+            raise BackendError(
+                "no positioner attached - the service was started with "
+                "--no-positioner, so nothing can turn the tower")
+        return self.pos
+
+    # -- identity / state -------------------------------------------------
+    def vna_idn(self) -> str:
+        return self.rx.describe()
+
+    def pos_idn(self) -> str | None:
+        return self.pos.identity() if self.pos else None
+
+    def position(self) -> float | None:
+        return self.pos.position() if self.pos else None
+
+    def speed(self) -> float | None:
+        return self.pos.speed() if self.pos else None
+
+    def latched_error(self) -> str | None:
+        return self.pos.latched_error() if self.pos else None
+
+    def correction_state(self) -> str:
+        # Not "0". Correction is a VNA's idea, and answering "off" would read
+        # as a calibration that exists and is disabled.
+        return "n/a (usrp)"
+
+    def acm_module(self) -> str | None:
+        return None
+
+    def acm_characterization(self) -> dict | None:
+        return None
+
+    def calibrate(self, req: "CalRequest", on_step=None,
+                  should_stop=None) -> str:
+        raise BackendError(
+            "this receiver has no calibration to run - error correction "
+            "belongs to the instrument, and a USRP provides none. Reference "
+            "the measurement instead: a monitor channel on the source, or a "
+            "substitution against a known standard.")
+
+    # -- control ----------------------------------------------------------
+    def set_speed(self, pct: float) -> None:
+        self._require_positioner().set_speed(pct)
+
+    def zero_here(self) -> None:
+        self._require_positioner().zero_here()
+
+    def stop(self) -> None:
+        if self.pos:
+            self.pos.stop()
+
+    def seek(self, deg: float, should_abort=None) -> float:
+        return self._require_positioner().seek(deg, should_abort)
+
+    # -- measurement ------------------------------------------------------
+    def set_parameter(self, parameter: str) -> None:
+        self.rx.set_parameter(parameter)
+
+    def configure(self, req: ScanRequest) -> None:
+        self.rx.configure(req.start_hz, req.stop_hz, req.points)
+
+    def frequencies(self) -> np.ndarray:
+        return self.rx.frequencies()
+
+    def measure(self) -> np.ndarray:
+        return self.rx.measure()
+
+    def close(self) -> None:
+        try:
+            self.rx.close()
+        finally:
+            if self.pos:
+                self.pos.close()
+
+
 # --------------------------------------------------------------------------
 # Service
 # --------------------------------------------------------------------------
@@ -1322,6 +1445,22 @@ async def serve(service: ChamberService, port: int) -> None:
 
 
 def build_backend(a) -> Any:
+    if getattr(a, "usrp", None):
+        # Transmit stays off unless asked for twice: once by choosing this
+        # backend, and once by --allow-tx. usrpcheck.py gates its loopback the
+        # same way, and bringup.py gates motion the same way again.
+        b = UsrpBackend(a.usrp, a.pos, a.slot, a.device,
+                        with_positioner=not a.no_positioner,
+                        allow_tx=getattr(a, "allow_tx", False),
+                        rate_hz=getattr(a, "usrp_rate", 200e6),
+                        monitor_chan=getattr(a, "monitor_chan", None),
+                        ref=getattr(a, "usrp_ref", "internal"))
+        pos = b.pos_idn() if b.has_positioner else "none (--no-positioner)"
+        print(f"backend: usrp\n  RX  {b.vna_idn()}\n  POS {pos}")
+        if not getattr(a, "allow_tx", False):
+            print("backend: transmit DISABLED - pass --allow-tx to measure",
+                  file=sys.stderr)
+        return b
     if getattr(a, "sim_sdr_monitor", False):
         # The other end of the SDR range: two channels, one of them watching a
         # coupler on the source, everything sharing a clock. Worth simulating
@@ -1380,6 +1519,18 @@ def main(argv=None) -> int:
                    help="simulated rig with a one-channel receiver's "
                         "capabilities: no reflection, no calibration, no "
                         "ratio - what an SDR path has to work within")
+    p.add_argument("--usrp", metavar="ARGS",
+                   help="use a USRP as the receiver, with UHD device args "
+                        "(e.g. addr=192.168.10.2). The tower is unchanged.")
+    p.add_argument("--usrp-rate", type=float, default=200e6,
+                   help="requested sample rate; what was actually set is used")
+    p.add_argument("--usrp-ref", default="internal", help="USRP clock source")
+    p.add_argument("--monitor-chan", type=int, default=None,
+                   help="second RX channel watching a coupler on the source; "
+                        "this is what restores the ratio a VNA gives for free")
+    p.add_argument("--allow-tx", action="store_true",
+                   help="permit the USRP to transmit. Without it the backend "
+                        "comes up and refuses to measure.")
     p.add_argument("--sim-sdr-monitor", action="store_true",
                    help="simulated rig with a monitored, phase-coherent "
                         "receiver's capabilities: still no reflection and no "
