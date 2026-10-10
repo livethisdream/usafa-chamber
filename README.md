@@ -343,11 +343,35 @@ The FTDI link corrupts bytes at a measurable rate — roughly 7% of exchanges in
 Retries warn on stderr. A run logging many of them means the link is degrading —
 suspect cable, hub, or RF pickup rather than the software.
 
+## SDR fallback (no VNA, no chamber)
+
+`sdr_pattern.py` measures a magnitude-only cut with two B205minis: one transmits
+a CW tone into a reference antenna, the other receives from the AUT on a tripod,
+turned by hand at each prompt (or by the positioner with `--pos`). Output lands
+in the same `pattern.csv` layout, with `mag_db` in dBFS and no phase.
+
+```
+sdr_pattern.py tx --freq-mhz 915                     # TX laptop, Ctrl-C = RF off
+sdr_pattern.py monitor --freq-mhz 915                # aim; AUT on a 50 ohm load = floor
+sdr_pattern.py rx --freq-mhz 915 --step 5 --outdir runs/aut1
+sdr_pattern.py rx --sim --no-prompt --step 10        # whole flow, no hardware
+```
+
+- Fit a DC block and a 10-20 dB pad on the RX port. The B205mini input damages
+  around -15 dBm.
+- Keep the deepest null at least 10 dB above the floor that `monitor` reports
+  with the AUT replaced by a load. Every reading flags low SNR and ADC clipping.
+- The run ends by re-measuring the start angle. More than 0.5 dB of drift means
+  the run should be repeated or broken into shorter segments.
+- UHD's Python bindings come with the UHD install, not pip, so run it with the
+  interpreter UHD installed into.
+
 ## Layout
 
 | Path | What |
 |---|---|
 | `pattern_measure.py` | Instrument wrappers and standalone step-and-measure acquisition |
+| `sdr_pattern.py` | Scalar pattern with two B205minis, outside the chamber (no VNA) |
 | `chamber_service.py` | WebSocket service (port 8766), hardware + simulated backends |
 | `frontend/` | Vite + Plotly dashboard |
 | `uicheck.py` | Browser check: drives the built dashboard against `--sim` |
