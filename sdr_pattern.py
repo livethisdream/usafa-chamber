@@ -142,7 +142,9 @@ class UhdRadio:
 
     # ---- transmit --------------------------------------------------------
 
-    def transmit_forever(self) -> None:
+    def transmit_forever(self, stop=None) -> None:
+        """Send the tone until Ctrl-C, or until `stop` (a threading.Event) is
+        set - the dashboard keys the transmitter only while it measures."""
         u, c, t = self.usrp, self.cfg, self.uhd.types
         u.set_tx_rate(c.rate, 0)
         u.set_tx_freq(t.TuneRequest(c.freq_hz), 0)
@@ -164,7 +166,7 @@ class UhdRadio:
         md.end_of_burst = False
         md.has_time_spec = False
         try:
-            while True:
+            while stop is None or not stop.is_set():
                 st.send(buf, md)
                 md.start_of_burst = False
         finally:
@@ -192,7 +194,10 @@ class SimRadio:
 
     def capture(self, n: int) -> tuple[np.ndarray, int]:
         g = abs(math.cos(math.radians(self.angle))) + 0.003   # nulls at 90/270
-        drift = 1.0 + 0.01 * (time.monotonic() - self.t0)
+        # About +/-0.25 dB over a couple of minutes: enough for the drift
+        # check to have something to find, bounded so a slow hand-turned run
+        # does not wander off by orders of magnitude.
+        drift = 1.0 + 0.03 * math.sin(2 * math.pi * (time.monotonic() - self.t0) / 120)
         a = 0.3 * g * drift
         k = np.arange(n)
         f = self.cfg.offset_hz + self.clock_off
@@ -200,10 +205,11 @@ class SimRadio:
         noise = (self.rng.standard_normal(n) + 1j * self.rng.standard_normal(n)) * 1e-4
         return (x + noise).astype(np.complex64), 0
 
-    def transmit_forever(self) -> None:
-        print("SIM: pretending to transmit, Ctrl-C to stop")
-        while True:
-            time.sleep(1)
+    def transmit_forever(self, stop=None) -> None:
+        if stop is None:
+            print("SIM: pretending to transmit, Ctrl-C to stop")
+        while stop is None or not stop.is_set():
+            time.sleep(0.05)
 
 
 # --------------------------------------------------------------------------

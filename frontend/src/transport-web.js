@@ -64,6 +64,8 @@ export function createWebTransport(callbacks = {}) {
                 case 'sweep_started':callbacks.onSweepStarted?.(data); break;
                 case 'sweep_trace': callbacks.onSweepTrace?.(data); break;
                 case 'sweep_done':  callbacks.onSweepDone?.(data); break;
+                case 'manual_prompt': callbacks.onManualPrompt?.(data); break;
+                case 'manual_cleared':callbacks.onManualCleared?.(data); break;
                 case 'log':         callbacks.onLog?.(data.level, data.source, data.message); break;
                 default:            callbacks.onMessage?.(data);
             }
@@ -105,6 +107,7 @@ export function createWebTransport(callbacks = {}) {
         cancelCal:   ()      => invoke('cancel_cal'),
         sweep:       (p)     => invoke('sweep', p),
         cancelSweep: ()      => invoke('cancel_sweep'),
+        manualStep:  (action) => invoke('manual_step', { action }),
         get isConnected() { return !!ws && ws.readyState === WebSocket.OPEN; },
     };
 }

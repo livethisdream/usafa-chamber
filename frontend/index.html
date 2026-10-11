@@ -316,6 +316,21 @@
 
         <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
 
+        <!-- The hand-turned rig's half of the conversation. In the flow rather
+             than a modal: whoever is watching has to see the pattern build
+             behind it, and the operator answers it dozens of times a run. -->
+        <div class="manual-prompt" id="manual-prompt" hidden aria-live="assertive">
+          <div class="manual-prompt-text">
+            <span class="manual-prompt-label">Turn the AUT to</span>
+            <span class="manual-prompt-angle" id="manual-angle">—</span>
+            <span class="manual-prompt-sub" id="manual-sub">—</span>
+          </div>
+          <div class="manual-prompt-actions">
+            <button class="btn btn-outline btn-small" id="btn-manual-redo" title="Measure the previous angle again (R)">Redo previous</button>
+            <button class="btn btn-primary" id="btn-manual-measure" title="The AUT is at this angle: measure it (Space)">Measure</button>
+          </div>
+        </div>
+
         <div class="plots-stack">
 
           <div class="chart-wrapper tab-content active" id="tab-pattern">

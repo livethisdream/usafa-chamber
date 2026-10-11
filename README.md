@@ -366,6 +366,34 @@ sdr_pattern.py rx --sim --no-prompt --step 10        # whole flow, no hardware
 - UHD's Python bindings come with the UHD install, not pip, so run it with the
   interpreter UHD installed into.
 
+### In the dashboard
+
+The same receiver, and a person in place of the tower, are both service flags:
+
+```
+chamber_service.py --sdr serial=RX --sdr-tx serial=TX --manual      # both B205s on this PC
+chamber_service.py --sdr serial=RX --manual                         # tone from another machine
+chamber_service.py --sdr sim --sdr-tx sim --manual                  # simulated, for practice
+chamber_service.py --manual                                         # the VNA, turned by hand
+```
+
+- `--manual` replaces the tower with a prompt. Each scan step shows **Turn the
+  AUT to N°** above the plots and waits for **Measure** (or Space, Enter,
+  PageDown). **Redo previous** (R, PageUp) steps back one angle and replaces its
+  rows rather than adding a second set. Jog, Go and define-zero are locked; STOP
+  ends the wait. The EMCenter is never opened.
+- `--sdr` measures one CW tone at `--sdr-freq-mhz` + `--sdr-offset-khz`
+  (default 915.1 MHz). The sweep fields lock to that frequency, and calibration
+  and the Sweep tab go away, as they do for `--sim-sdr`.
+- `--sdr-tx` keys the transmitter only while a scan runs: on at the start, off
+  on every way out, STOP included. Without it the tone has to come from
+  `sdr_pattern.py tx` on another machine, at the same frequency and offset.
+- With two B205s on one PC, give each its serial (`uhd_find_devices` lists
+  them); `type=b200` alone picks whichever UHD finds first.
+- `meta.json` records the receiver (radio, tone, gains) and that the positioner
+  was manual. There is no end-of-run drift recheck here, unlike the CLI; scan
+  the first angle again as a last point if drift matters.
+
 ## Layout
 
 | Path | What |

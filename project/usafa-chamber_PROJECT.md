@@ -267,6 +267,12 @@ Windows).
             has: off on every exit path, before the axis stop, with a `rigcheck`
             scenario holding it there. Worth building before any of the
             measurement work.
+      - [x] **B205 tone receiver and hand-turned positioner in the dashboard**
+            (`--sdr`, `--sdr-tx`, `--manual`). Built in-process rather than
+            over the ZMQ plane: plain power-vs-angle is the case the design
+            note says needs no socket. The transmitter is keyed only while a
+            scan runs and released on every exit; `rigcheck` holds that
+            (`manual_stop`). Not yet run on real B205s.
       - [ ] Answer the open questions at the foot of the design note — PA
             control interface, X310 daughterboards, B205 clocking, and which
             measurement is wanted first. They change what gets built.

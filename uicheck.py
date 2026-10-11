@@ -444,6 +444,81 @@ def main(argv=None) -> int:
                       offered == ["S21"], ", ".join(offered))
                 page.screenshot(path=str(a.shots / "scalar-receiver.png"))
 
+            # The class-demo rig: an SDR tone receiver and a person turning
+            # the AUT. The prompt has to appear, answer to the keyboard as
+            # well as the button, step back on redo, and go away at the end -
+            # and the controls that drive an axis or a sweep have to stay
+            # locked throughout, including after every syncControls.
+            sdr.terminate()
+            try:
+                sdr.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                sdr.kill()
+            shutil.rmtree(ROOT / "runs" / "uicheck-manual", ignore_errors=True)
+            hand = start_service("--sdr", "sim", "--sdr-tx", "sim", "--manual")
+            services.append(hand)
+            if not wait_port(a.ws_port):
+                check("hand-turned rig comes up", False, "service did not start")
+            else:
+                page.reload(wait_until="networkidle")
+                page.wait_for_timeout(1800)
+                check("tone locks the sweep fields",
+                      page.is_disabled("#f-start")
+                      and page.input_value("#f-start") == "0.915100",
+                      page.input_value("#f-start"))
+                open_section(page, "Turntable")
+                check("no axis to jog by hand",
+                      page.is_disabled("#btn-goto")
+                      and page.is_disabled("[data-jog='10']")
+                      and not page.is_disabled("#a-step"),
+                      page.inner_text("#pos-idn"))
+                page.fill("#a-start", "0")
+                page.fill("#a-stop", "270")
+                page.fill("#a-step", "90")
+                open_section(page, "Output")
+                page.fill("#run-name", "uicheck-manual")
+                page.click("#btn-scan")
+
+                def prompt_for(deg: str, timeout_ms: int = 8000) -> bool:
+                    try:
+                        page.wait_for_function(
+                            "d => !document.getElementById('manual-prompt').hidden"
+                            " && document.getElementById('manual-angle')"
+                            ".textContent === d", arg=deg, timeout=timeout_ms)
+                        return True
+                    except Exception:
+                        return False
+
+                check("operator asked for 0", prompt_for("0.0°"),
+                      page.inner_text("#manual-sub"))
+                page.screenshot(path=str(a.shots / "manual-prompt.png"))
+                page.locator("body").click(position={"x": 5, "y": 5})
+                page.keyboard.press("Space")
+                check("Space measures", prompt_for("90.0°"),
+                      page.inner_text("#progress-label"))
+                page.keyboard.press("r")
+                check("R steps back one", prompt_for("0.0°"))
+                page.click("#btn-manual-measure")
+                ok = prompt_for("90.0°")
+                for nxt in ("180.0°", "270.0°"):
+                    page.click("#btn-manual-measure")
+                    ok = ok and prompt_for(nxt)
+                page.click("#btn-manual-measure")
+                try:
+                    page.wait_for_function(
+                        "() => document.getElementById('progress-label')"
+                        ".textContent === 'complete'", timeout=10000)
+                    finished = True
+                except Exception:
+                    finished = False
+                check("hand-turned scan completes",
+                      ok and finished and not page.is_visible("#manual-prompt"),
+                      page.inner_text("#progress-label"))
+                rows = (ROOT / "runs" / "uicheck-manual" / "pattern.csv"
+                        ).read_text().strip().splitlines()[1:]
+                check("one row per angle after redo", len(rows) == 4,
+                      f"{len(rows)} rows")
+
             browser.close()
     finally:
         for proc in (*services, http):

@@ -36,6 +36,12 @@ const state = {
     // VNA-only capture. sweepData is keyed by S-parameter, each {re, im}.
     sweeping: false,
     hasPositioner: true,
+    // A person turns the AUT. manualPending is the angle they are being asked
+    // for right now, or null; manualSent holds the buttons down between an
+    // answer and the next question so one press cannot measure twice.
+    manual: false,
+    manualPending: null,
+    manualSent: false,
     // A VNA's answer until the service says otherwise, so a backend that
     // predates the capability block behaves exactly as it always did.
     caps: { parameters: ['S11', 'S21', 'S12', 'S22'], reflection: true,
@@ -805,6 +811,7 @@ function applyState(s) {
     state.mode = s.mode;
     $('vna-idn').textContent = s.vna_idn || '—';
     state.hasPositioner = s.has_positioner !== false;
+    state.manual = !!s.manual;
     $('pos-idn').textContent = state.hasPositioner
         ? (s.pos_idn || '—') : 'not attached (--no-positioner)';
     $('pos-err').textContent = state.hasPositioner ? (s.latched_error ?? '—') : '—';
@@ -821,6 +828,8 @@ function applyState(s) {
     if (s.error) addLog('error', 'state', s.error);
     state.scanning = !!s.scanning;
     syncControls();
+    // Last, so the prompt is drawn against controls that are already locked.
+    showManualPrompt(s.manual_pending ?? null);
 }
 
 /** One place for "the axis is here", since three frames can report it. */
@@ -843,6 +852,18 @@ const SCAN_INPUTS = ['f-start', 'f-stop', 'f-points', 'f-ifbw', 'f-power', 'f-pa
  * missing feature, and the operator has no way to tell that from a broken UI.
  */
 function applyPositionerPresence() {
+    if (state.manual) {
+        // A person is the positioner. The grid still means something - it is
+        // what they will be asked for - but there is no axis to jog, zero or
+        // set a speed on, and a Go button that prompted for one angle would
+        // be a scan of one with no measurement.
+        ['a-speed', 'jog-abs', 'btn-goto', 'btn-zero'].forEach((id) => {
+            const el = $(id);
+            if (el) { el.disabled = true; el.title = 'Turned by hand: no axis to drive'; }
+        });
+        document.querySelectorAll('[data-jog]').forEach((b) => { b.disabled = true; });
+        return;
+    }
     const none = !state.hasPositioner;
     const POS_CONTROLS = ['a-start', 'a-stop', 'a-step', 'a-speed', 'jog-abs',
                           'btn-goto', 'btn-zero', 'btn-scan'];
@@ -890,6 +911,8 @@ function applyCapabilities() {
         }
     }
 
+    applyFixedFrequency();
+
     // The section is named after what is actually installed. Calling it VNA
     // with no VNA behind it is a small lie, and the operator reading "VNA
     // identity: none" is entitled to wonder which of the two is broken.
@@ -906,6 +929,32 @@ function applyCapabilities() {
         : '';
 }
 
+/**
+ * Lock the sweep fields to the one frequency a tone receiver measures.
+ *
+ * Shown rather than blanked: the tone is part of what the run means, and the
+ * fields are where anyone looks for the frequency. Re-applied after every
+ * syncControls, which would otherwise hand them back on the next idle.
+ */
+function applyFixedFrequency() {
+    const hz = state.caps?.fixed_hz;
+    if (!hz) return;
+    const ghz = (hz / 1e9).toFixed(6);
+    const why = 'This receiver measures one CW tone, set when the service '
+              + 'starts. The sweep fields do not apply.';
+    for (const [id, v] of [['f-start', ghz], ['f-stop', ghz], ['f-points', '1']]) {
+        const el = $(id);
+        if (!el) continue;
+        if (el.value !== v) el.value = v;
+        el.disabled = true;
+        el.title = why;
+    }
+    for (const id of ['f-ifbw', 'f-power']) {
+        const el = $(id);
+        if (el) { el.disabled = true; el.title = why; }
+    }
+}
+
 function syncControls() {
     const busy = state.scanning || state.calibrating || state.sweeping
               || !state.connected;
@@ -920,7 +969,8 @@ function syncControls() {
     $('btn-sweep').textContent = state.sweeping ? 'Sweeping…' : 'Sweep';
     // A sweep never touches the tower, so it stays available on a rig that
     // has none. Everything that turns something does not.
-    if (!state.hasPositioner) applyPositionerPresence();
+    if (!state.hasPositioner || state.manual) applyPositionerPresence();
+    applyFixedFrequency();
     // Stop stays enabled whenever there is a link: it is the one control that
     // must always be reachable, and the service preempts rather than queues.
     $('btn-stop').disabled = !state.connected;
@@ -962,6 +1012,54 @@ function updateAngleCount() {
 }
 
 // ---------------------------------------------------------------------------
+// Hand-turned positioner: the operator prompt
+// ---------------------------------------------------------------------------
+
+/** Show the angle the operator is being asked for, or hide the prompt. */
+function showManualPrompt(deg) {
+    state.manualPending = deg;
+    state.manualSent = false;
+    const box = $('manual-prompt');
+    const show = deg != null;
+    if (box.hidden === show) {
+        box.hidden = !show;
+        // The prompt takes room from the plots; Plotly does not notice.
+        requestAnimationFrame(resizeAll);
+    }
+    if (!show) return;
+    $('manual-angle').textContent = `${deg.toFixed(1)}°`;
+    const n = state.angles.length;
+    const k = state.angles.findIndex((a) => Math.abs(a - deg) < 1e-6);
+    $('manual-sub').textContent = k >= 0 && n
+        ? `point ${k + 1} of ${n} · Space to measure, R to redo the previous`
+        : 'Space to measure';
+    $('btn-manual-measure').disabled = false;
+    // Nothing before the first point to redo.
+    $('btn-manual-redo').disabled = k <= 0;
+    $('progress-label').textContent = `waiting: turn to ${deg.toFixed(1)}°`;
+    dial.setData({ commanded: deg });
+    dial.draw();
+}
+
+function answerManual(action) {
+    if (state.manualPending == null || state.manualSent) return;
+    if (action === 'redo' && $('btn-manual-redo').disabled) return;
+    state.manualSent = true;
+    $('btn-manual-measure').disabled = true;
+    $('btn-manual-redo').disabled = true;
+    $('progress-label').textContent = action === 'redo'
+        ? 'going back one' : `measuring ${state.manualPending.toFixed(1)}°…`;
+    guard(() => transport.manualStep(action)).then((r) => {
+        // Refused - most likely the prompt was already answered elsewhere.
+        // Give the buttons back rather than leave the operator stuck.
+        if (r == null && state.manualPending != null) {
+            state.manualSent = false;
+            $('btn-manual-measure').disabled = false;
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Transport
 // ---------------------------------------------------------------------------
 const transport = createTransport({
@@ -981,6 +1079,8 @@ const transport = createTransport({
     onSweepStarted,
     onSweepTrace,
     onSweepDone,
+    onManualPrompt: (m) => showManualPrompt(m.deg),
+    onManualCleared: () => showManualPrompt(null),
     onCalDone: (m) => {
         state.calibrating = false;
         calStage('done');
@@ -1038,6 +1138,7 @@ const transport = createTransport({
     },
     onScanDone: (m) => {
         state.scanning = false;
+        showManualPrompt(null);
         $('progress-label').textContent = m.cancelled
             ? `cancelled${m.n_done != null ? ` at ${m.n_done}` : ''}` : 'complete';
         if (m.error) addLog('error', 'scan', m.error);
@@ -1484,11 +1585,12 @@ function setPatternView(view) {
 }
 
 function resizeAll() {
-    Plotly.Plots.resize('chart-polar');
-    Plotly.Plots.resize('chart-pattern-rect');
-    Plotly.Plots.resize('chart-rect');
-    Plotly.Plots.resize('chart-smith');
-    Plotly.Plots.resize('chart-sweep-mag');
+    // Skip a chart its receiver has hidden: Plotly refuses to resize a div
+    // that is not displayed, and the SDR rig hides the Smith chart outright.
+    for (const id of ['chart-polar', 'chart-pattern-rect', 'chart-rect',
+                      'chart-smith', 'chart-sweep-mag']) {
+        if (!$(id).closest('[hidden]')) Plotly.Plots.resize(id);
+    }
     dial.resize();
 }
 
@@ -1500,6 +1602,25 @@ function wire() {
     });
 
     $('btn-stop').addEventListener('click', () => guard(() => transport.stop()));
+
+    $('btn-manual-measure').addEventListener('click', () => answerManual('measure'));
+    $('btn-manual-redo').addEventListener('click', () => answerManual('redo'));
+    // Space or Enter measures, R redoes - for an operator standing at the
+    // tripod with a wireless keyboard or a presentation clicker. Ignored while
+    // typing in a field, and ignored on a focused button: the browser already
+    // clicks it, and answering twice would measure the next angle unturned.
+    document.addEventListener('keydown', (e) => {
+        if (state.manualPending == null || e.repeat) return;
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+        if (e.target.closest?.('input, select, textarea, button')) return;
+        if (e.key === ' ' || e.key === 'Enter' || e.key === 'PageDown') {
+            e.preventDefault();
+            answerManual('measure');
+        } else if (e.key === 'r' || e.key === 'R' || e.key === 'PageUp') {
+            e.preventDefault();
+            answerManual('redo');
+        }
+    });
 
     document.querySelectorAll('[data-jog]').forEach((b) => {
         b.addEventListener('click', () =>
