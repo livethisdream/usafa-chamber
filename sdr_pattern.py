@@ -68,6 +68,7 @@ class RadioConfig:
     rx_gain: float = 40.0           # B205mini: 0-76 dB
     tx_ant: str = "TX/RX"
     rx_ant: str = "RX2"
+    subdev: str = ""                # e.g. "B:0" for an X310's second slot (RF1)
 
 
 @dataclass
@@ -99,16 +100,36 @@ def device_args(args: str, platform: str = sys.platform) -> str:
     return args
 
 
+def open_usrp(uhd, args: str, tries: int = 4, wait_s: float = 1.0):
+    """MultiUSRP, retried on "No devices found". UHD's unicast discovery to
+    addr= waits briefly, and when the host has no ARP entry for the radio
+    (it expires after a minute or so idle) the reply misses that window. The
+    failed try fills the ARP cache, so the next one finds it."""
+    for k in range(tries):
+        try:
+            return uhd.usrp.MultiUSRP(args)
+        except RuntimeError as e:
+            if "No devices found" not in str(e) or k == tries - 1:
+                raise
+            time.sleep(wait_s)
+
+
 class UhdRadio:
     def __init__(self, cfg: RadioConfig):
         import uhd  # deferred so --sim and --help work without UHD
         self.uhd = uhd
         self.cfg = cfg
-        self.usrp = uhd.usrp.MultiUSRP(device_args(cfg.args))
+        self.usrp = open_usrp(uhd, device_args(cfg.args))
+        if cfg.subdev:
+            # Channel 0 is whichever slot this names, for TX and RX alike.
+            spec = uhd.usrp.SubdevSpec(cfg.subdev)
+            self.usrp.set_rx_subdev_spec(spec)
+            self.usrp.set_tx_subdev_spec(spec)
 
     def describe(self) -> str:
         try:
-            return self.usrp.get_pp_string().strip().splitlines()[0]
+            u = self.usrp
+            return f"{u.get_mboard_name()} / {u.get_rx_subdev_name(0)}"
         except Exception:
             return self.cfg.args
 
@@ -491,6 +512,9 @@ def main(argv=None) -> int:
         sp.add_argument("--offset-khz", type=float, default=d.offset_hz / 1e3,
                         help="tone offset above the LO; same on both ends")
         sp.add_argument("--rate", type=float, default=d.rate)
+        sp.add_argument("--subdev", default=d.subdev,
+                        help="daughterboard slot, e.g. 'B:0' for an X310's RF1 "
+                             "(default: the device's first)")
         sp.add_argument("--sim", action="store_true", help="no hardware")
 
     def capture_args(sp):
@@ -533,7 +557,7 @@ def main(argv=None) -> int:
 
     a = p.parse_args(argv)
     cfg = RadioConfig(args=a.args, freq_hz=a.freq_mhz * 1e6,
-                      offset_hz=a.offset_khz * 1e3, rate=a.rate)
+                      offset_hz=a.offset_khz * 1e3, rate=a.rate, subdev=a.subdev)
     if a.cmd == "tx":
         cfg.tx_gain = a.tx_gain
     else:

@@ -373,6 +373,7 @@ The same receiver, and a person in place of the tower, are both service flags:
 ```
 chamber_service.py --sdr serial=RX --sdr-tx serial=TX --manual      # both B205s on this PC
 chamber_service.py --sdr addr=192.168.10.2 --sdr-tx addr=192.168.10.2 --manual   # one N200, TX/RX -> RX2
+chamber_service.py --sdr addr=192.168.10.2 --sdr-tx addr=192.168.10.2 --sdr-subdev B:0 --manual   # X310, RF1
 chamber_service.py --sdr serial=RX --manual                         # tone from another machine
 chamber_service.py --sdr sim --sdr-tx sim --manual                  # simulated, for practice
 chamber_service.py --manual                                         # the VNA, turned by hand
@@ -396,6 +397,12 @@ chamber_service.py --manual                                         # the VNA, t
   `send_frame_size=1000` added unless the args set it: larger UDP frames reach
   it out of sequence ("SSSS") and nothing is transmitted. With the antennas
   inches apart, start both gains at 0.
+- `--sdr-subdev` picks the daughterboard slot for TX and RX, e.g. `B:0` for an
+  X310's RF1 (`--subdev` on `sdr_pattern.py`). An X310 needs an FPGA image that
+  matches the UHD build; `uhd_usrp_probe` says so, and `uhd_image_loader
+  --args type=x300,addr=...,fpga=HG` fixes it (1 GbE is SFP+ port 0, HG image).
+- Opening a radio retries "No devices found" a few times: UHD's discovery
+  gives up before Windows has re-learned an idle radio's MAC address.
 - `meta.json` records the receiver (radio, tone, gains) and that the positioner
   was manual. There is no end-of-run drift recheck here, unlike the CLI; scan
   the first angle again as a last point if drift matters.
