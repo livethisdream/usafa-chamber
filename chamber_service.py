@@ -1009,6 +1009,10 @@ class ChamberService:
         self._lock = threading.Lock()
         self.last_run: dict | None = None
         self.calibration: dict | None = _load_calibration()
+        # The running scan's frames, so a browser that connects mid-scan can
+        # draw what it missed: scan_started, then the latest point per index.
+        self._scan_started: str | None = None
+        self._scan_points: dict[int, str] = {}
         # A backend whose parts talk to the operator - a hand-turned
         # positioner's prompts, a transmitter saying it is keyed - gets the
         # same push and log the service uses.
@@ -1023,7 +1027,21 @@ class ChamberService:
     def push(self, payload: dict) -> None:
         """Broadcast a frame. Safe to call from the worker thread."""
         msg = json.dumps(payload, default=_json_default)
+        kind = payload.get("type")
+        if kind == "scan_started":
+            self._scan_started, self._scan_points = msg, {}
+        elif kind == "scan_point":
+            self._scan_points[payload["index"]] = msg   # a redo replaces it
+        elif kind == "scan_done":
+            self._scan_started, self._scan_points = None, {}
         asyncio.run_coroutine_threadsafe(self._broadcast(msg), self.loop)
+
+    def scan_replay(self) -> list[str]:
+        """Frames a client connecting mid-scan needs, in order."""
+        started, points = self._scan_started, dict(self._scan_points)
+        if started is None or not self.scanning:
+            return []
+        return [started] + [points[i] for i in sorted(points)]
 
     async def _broadcast(self, msg: str) -> None:
         dead = []
@@ -1695,6 +1713,8 @@ async def serve(service: ChamberService, port: int) -> None:
             await ws.send(json.dumps({"type": "state",
                                       "data": service.get_state()},
                                      default=_json_default))
+            for frame in service.scan_replay():
+                await ws.send(frame)
             async for msg in ws:
                 reply = await service.handle(msg)
                 if reply is not None:
@@ -1783,7 +1803,10 @@ def build_sdr_backend(a) -> "SdrBackend":
         if (a.sdr_tx == "sim") != sim:
             raise SystemExit("--sdr and --sdr-tx must both be 'sim' or both "
                              "be real radios")
-        tx = make(replace(rx, args="" if sim else a.sdr_tx))
+        # One radio with a TX and an RX port (an N200 at addr=...) is opened
+        # once; UHD will not hand out a second session to the same device.
+        same = not sim and a.sdr_tx == a.sdr
+        tx = radio if same else make(replace(rx, args="" if sim else a.sdr_tx))
 
     if getattr(a, "manual", False):
         pos = ManualPositioner()
