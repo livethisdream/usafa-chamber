@@ -1795,7 +1795,8 @@ def build_sdr_backend(a) -> "SdrBackend":
     rx = sp.RadioConfig(args="" if sim else a.sdr,
                         freq_hz=a.sdr_freq_mhz * 1e6,
                         offset_hz=a.sdr_offset_khz * 1e3,
-                        rx_gain=a.sdr_rx_gain, tx_gain=a.sdr_tx_gain)
+                        rx_gain=a.sdr_rx_gain, tx_gain=a.sdr_tx_gain,
+                        subdev=a.sdr_subdev)
     make = sp.SimRadio if sim else sp.UhdRadio
     radio = make(rx)
     tx = None
@@ -1866,6 +1867,9 @@ def main(argv=None) -> int:
     p.add_argument("--sdr-offset-khz", type=float, default=sdr.offset_hz / 1e3)
     p.add_argument("--sdr-rx-gain", type=float, default=sdr.rx_gain)
     p.add_argument("--sdr-tx-gain", type=float, default=sdr.tx_gain)
+    p.add_argument("--sdr-subdev", default=sdr.subdev, metavar="SPEC",
+                   help="daughterboard slot for TX and RX, e.g. 'B:0' for an "
+                        "X310's RF1 (default: the device's first)")
     p.add_argument("--vna", default=None)
     p.add_argument("--pos", default=None)
     p.add_argument("--slot", type=int, default=None)
