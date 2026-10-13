@@ -721,6 +721,92 @@ def pm_on(state):
     return pattern_measure.correction_is_on(state)
 
 
+# ------------------------------------------------- hand-turned and SDR rigs
+
+def s_manual_sdr():
+    # The class-demo rig: two B205s (simulated) and a person turning the AUT.
+    # The operator measures twice, then asks for the previous angle again,
+    # which is the one thing a hand-turned run needs that a tower run never
+    # does - and which must replace that angle's rows, not add a second set.
+    return {"_target": "manual"}, ["--sdr"]
+
+
+def check_manual_sdr(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    m = r["manual"]
+    assert m["prompts"] == [0.0, 90.0, 180.0, 90.0, 180.0, 270.0], (
+        f"the operator was asked for the wrong angles: {m['prompts']}")
+    angles = _angles(outdir)
+    assert angles == [0.0, 90.0, 180.0, 270.0], (
+        f"pattern.csv does not hold one trace per angle: {angles}")
+    rows = _rows(outdir)
+    assert len(rows) == 4, f"a redo left {len(rows)} rows for 4 angles"
+    db = {float(x["angle_cmd_deg"]): float(x["mag_db"]) for x in rows}
+    assert db[0.0] - db[90.0] > 30, (
+        f"the null at 90 deg is not a null: {db}")
+    assert any("re-measuring 90.0" in x for x in m["logs"]), (
+        "the redo was not said in the log")
+    assert m["tx_on_logged"] and m["tx_off_after"], (
+        "the transmitter was not keyed for the run and released after it")
+    assert m["meta"]["positioner"] == "manual", m["meta"]["positioner"]
+    assert m["meta"]["receiver"]["kind"] == "sdr_tone", m["meta"]["receiver"]
+    assert m["caps"]["fixed_hz"] == 915.1e6, m["caps"]
+    return "6 prompts for 4 angles, redo replaced its rows, RF off after"
+
+
+def s_manual_stop():
+    # STOP while the operator is being asked for an angle. Nothing is moving,
+    # but the scan is still live and the transmitter is still keyed - both
+    # have to end, and the prompt has to go away.
+    return {"_target": "manual"}, ["--sdr", "--stop-at-prompt"]
+
+
+def check_manual_stop(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    m = r["manual"]
+    assert m["done"] and m["done"].get("cancelled"), (
+        f"the scan did not end cancelled: {m['done']}")
+    assert m["cleared"], "the prompt was never withdrawn"
+    assert m["tx_off_after"], "STOP left the transmitter keyed"
+    assert "turned by hand" in m["refused"].get("jog", ""), (
+        f"jog was not refused in words: {m['refused']}")
+    assert "nothing is waiting" in m["refused"].get("late_answer", ""), (
+        f"an answer with no question pending was not refused: {m['refused']}")
+    return "STOP ends the wait, withdraws the prompt and drops RF"
+
+
+def s_manual_vna():
+    # The VNA with a person in place of the tower - the rig once the VNA is
+    # back but the chamber is not. --manual must never open the EMCenter, so
+    # not one SK reaches the card.
+    return {"_target": "manual"}, ["--vna"]
+
+
+def check_manual_vna(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    assert not r["seeks"], f"the tower was commanded: {r['seeks']}"
+    assert r["manual"]["pos_kind"] == "ManualPositioner", r["manual"]["pos_kind"]
+    assert _angles(outdir) == [0.0, 90.0, 180.0, 270.0], _angles(outdir)
+    return "VNA scan driven by prompts; EMCenter untouched"
+
+
+def s_sdr_flags():
+    # The CLI wiring, the way --no-positioner once was not: flags that reach
+    # argparse and stop there pass every scenario that builds a backend by
+    # hand. Also: one simulated radio and one real one is refused.
+    return {"_target": "manual"}, ["--flags"]
+
+
+def check_sdr_flags(r, outdir):
+    assert r["rc"] == 0, f"harness error: {r['exc']}"
+    m = r["manual"]
+    assert m["built"] == "SdrBackend/ManualPositioner", m["built"]
+    assert m["state"]["manual"] and m["state"]["has_positioner"], m["state"]
+    assert abs(m["state"]["capabilities"]["fixed_hz"] - 433.05e6) < 1, m["state"]
+    assert "both be 'sim'" in m["mixed_refused"], m["mixed_refused"]
+    return "--sdr/--sdr-tx/--manual reach the backend; mixed sim refused"
+
+
 SCENARIOS = [
     ("nominal", s_nominal, check_nominal),
     ("endpoint", s_endpoint, check_endpoint),
@@ -762,6 +848,10 @@ SCENARIOS = [
     ("sweep_no_positioner", s_sweep_no_positioner, check_sweep_no_positioner),
     ("cal_vs_scan", s_cal_refused_while_scanning, check_cal_refused_while_scanning),
     ("cal_mismatch", s_cal_sweep_mismatch, check_cal_sweep_mismatch),
+    ("manual_sdr", s_manual_sdr, check_manual_sdr),
+    ("manual_stop", s_manual_stop, check_manual_stop),
+    ("manual_vna", s_manual_vna, check_manual_vna),
+    ("sdr_flags", s_sdr_flags, check_sdr_flags),
 ]
 
 
@@ -805,6 +895,8 @@ def _child(faults_json: str, argv: list[str]) -> int:
             rc = _run_service(argv)
         elif target == "scalar":
             rc = _run_scalar(argv)
+        elif target == "manual":
+            rc = _run_manual(argv)
         else:
             rc = pattern_measure.main(argv)
     except SystemExit as e:                     # argparse and friends
@@ -825,7 +917,138 @@ def _child(faults_json: str, argv: list[str]) -> int:
         "cal": _CAL_RESULT.copy(),
         "sweep": _SWEEP_RESULT.copy(),
         "scalar": _SCALAR_RESULT.copy(),
+        "manual": _MANUAL_RESULT.copy(),
     }), flush=True)
+    return 0
+
+
+_MANUAL_RESULT: dict = {}
+
+
+def _run_manual(argv: list[str]) -> int:
+    """Drive a scan whose positioner is a person, with a scripted person.
+
+    The scan worker runs on this thread; the operator is a second thread that
+    watches the pushed frames and answers each prompt the way the dashboard's
+    buttons would, through cmd_manual_step. So what is under test is the whole
+    loop - prompt, wait, answer, measure, redo - and not a stub of it.
+    """
+    import argparse
+    import asyncio
+    import queue
+    import threading
+    import warnings
+
+    import chamber_service as cs
+    import sdr_pattern as sp
+
+    warnings.filterwarnings("ignore", message=r"coroutine .* was never awaited")
+
+    outdir = Path(argv[argv.index("--outdir") + 1])
+    cs.RUNS_DIR = outdir.parent
+    loop = asyncio.new_event_loop()
+
+    def ns(**kw):
+        base = dict(sim=False, sim_sdr=False, sim_sdr_monitor=False,
+                    no_fallback=True, no_positioner=False, no_vna=False,
+                    vna=None, pos=None, slot=None, device=None, manual=True,
+                    sdr=None, sdr_tx=None, sdr_freq_mhz=915.0,
+                    sdr_offset_khz=100.0, sdr_rx_gain=40.0, sdr_tx_gain=70.0)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    try:
+        if "--flags" in argv:
+            b = cs.build_backend(ns(sdr="sim", sdr_tx="sim", sdr_freq_mhz=432.95))
+            svc = cs.ChamberService(b, loop)
+            try:
+                cs.build_backend(ns(sdr="sim", sdr_tx="serial=XYZ"))
+                mixed = ""
+            except SystemExit as e:
+                mixed = str(e)
+            _MANUAL_RESULT.update({
+                "built": f"{type(b).__name__}/{type(b.pos).__name__}",
+                "state": svc.get_state(), "mixed_refused": mixed})
+            return 0
+
+        if "--vna" in argv:
+            backend = cs.HardwareBackend("TCPIP0::127.0.0.1::5025::SOCKET",
+                                         "ASRL16::INSTR", 1, "A", manual=True)
+        else:
+            rx = sp.RadioConfig()
+            backend = cs.SdrBackend(rx, sp.SimRadio(rx),
+                                    positioner=cs.ManualPositioner(),
+                                    tx_radio=sp.SimRadio(rx),
+                                    cap=sp.CaptureConfig(repeats=1),
+                                    mode="sim")
+        svc = cs.ChamberService(backend, loop)
+        prompts: "queue.Queue[float]" = queue.Queue()
+        frames: list[dict] = []
+
+        def push(f):
+            frames.append(f)
+            if f.get("type") == "manual_prompt":
+                prompts.put(f["deg"])
+        svc.push = push
+
+        stop_at_prompt = "--stop-at-prompt" in argv
+        asked: list[float] = []
+        refused: dict = {}
+
+        def operator():
+            # measure, measure, then redo on the third prompt, then measure on.
+            n = 0
+            while True:
+                try:
+                    deg = prompts.get(timeout=10)
+                except queue.Empty:
+                    return
+                asked.append(deg)
+                if stop_at_prompt:
+                    svc.cmd_stop({})
+                    return
+                n += 1
+                svc.cmd_manual_step({"action": "redo" if n == 3 else "measure"})
+
+        t = threading.Thread(target=operator, daemon=True)
+        t.start()
+        svc._worker = threading.current_thread()     # reads as "scanning"
+        svc._run_scan(cs.ScanRequest(start_deg=0.0, stop_deg=360.0,
+                                     step_deg=90.0, points=11,
+                                     name=outdir.name))
+        svc._worker = None
+        t.join(timeout=15)
+        try:
+            svc.cmd_manual_step({"action": "measure"})
+        except cs.BackendError as e:
+            refused["late_answer"] = str(e)
+        try:
+            svc.cmd_jog({"delta": 10})       # idle now, so only manual refuses
+        except cs.BackendError as e:
+            refused["jog"] = str(e)
+
+        logs = [f.get("message", "") for f in frames if f.get("type") == "log"]
+        meta_path = outdir / "meta.json"
+        tx_thread = getattr(backend, "_tx_thread", None)
+        _MANUAL_RESULT.update({
+            "prompts": asked,
+            "logs": logs,
+            "done": next((f for f in frames if f.get("type") == "scan_done"), None),
+            "cleared": any(f.get("type") == "manual_cleared" for f in frames),
+            "refused": refused,
+            "tx_on_logged": any("transmitter ON" in x for x in logs),
+            "tx_off_after": tx_thread is None,
+            "meta": json.loads(meta_path.read_text()) if meta_path.is_file() else {},
+            "caps": svc.capabilities().as_dict(),
+            "pos_kind": type(backend.pos).__name__,
+        })
+        # scan_done carries meta with numpy-free content, but the started
+        # frame does not; keep the payload to what json can carry.
+        if _MANUAL_RESULT["done"]:
+            _MANUAL_RESULT["done"] = {k: v for k, v in _MANUAL_RESULT["done"].items()
+                                      if k in ("cancelled", "n_done", "error")}
+    finally:
+        loop.close()
     return 0
 
 
@@ -1149,6 +1372,7 @@ def run_one(name: str, setup, check, verbose: bool) -> tuple[bool, str]:
              "cal": payload.get("cal", {}),
              "sweep": payload.get("sweep", {}),
              "scalar": payload.get("scalar", {}),
+             "manual": payload.get("manual", {}),
              "stops": payload.get("stops", []),
              "seeks": payload.get("seeks", []),
              "sweeps": payload.get("sweeps", 0),

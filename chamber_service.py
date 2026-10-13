@@ -17,9 +17,15 @@ Two backends implement one interface:
   * SimBackend      — synthesizes a plausible pattern and preserves the payload
     contract exactly, so the frontend is fully developable away from the chamber.
 
+A third, SdrBackend, puts a B205 measuring one CW tone in the VNA's place, and
+any backend can take a ManualPositioner in the tower's: each scan step prompts
+the operator for the angle and waits for them to say it is there.
+
 Run:
     python chamber_service.py --sim        # no hardware needed
     python chamber_service.py              # real rig, falls back to sim if absent
+    python chamber_service.py --sdr sim --sdr-tx sim --manual   # SDR + hand-turned, simulated
+    python chamber_service.py --sdr serial=RX --sdr-tx serial=TX --manual
 """
 
 from __future__ import annotations
@@ -32,13 +38,14 @@ import math
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 
 import pattern_measure as pm
+import sdr_pattern as sp
 
 DEFAULT_PORT = 8766          # 8765 belongs to the Phaser service; coexist with it
 RUNS_DIR = Path("runs")
@@ -328,6 +335,10 @@ class Capabilities:
                   synthesizer and hands back the whole span; an SDR digitizes
                   a window, and a wider request has to be taken in retuned
                   segments.
+    `fixed_hz`    the one frequency a tone receiver measures at, or None for
+                  one that takes the sweep it is asked for. A CW source on a
+                  separate radio is set where it is set; the sweep fields have
+                  nothing to say to it, and the dashboard locks them.
 
     These describe the *installed configuration*, not what the box is capable
     of. An X310 with two daughterboards and no coupler on the source has no
@@ -342,6 +353,7 @@ class Capabilities:
     monitor: bool = False
     coherent: bool = True
     span_hz: float | None = None
+    fixed_hz: float | None = None
 
     def as_dict(self) -> dict:
         return {"parameters": list(self.parameters),
@@ -350,7 +362,8 @@ class Capabilities:
                 "ratio": self.ratio,
                 "monitor": self.monitor,
                 "coherent": self.coherent,
-                "span_hz": self.span_hz}
+                "span_hz": self.span_hz,
+                "fixed_hz": self.fixed_hz}
 
 
 # A VNA: four parameters, reflection, a cal module, and self-referencing.
@@ -382,6 +395,326 @@ SCALAR_CAPS = Capabilities(parameters=("S21",), reflection=False,
 X310_MONITOR_CAPS = Capabilities(parameters=("S21",), reflection=False,
                                  calibration=False, ratio=True, monitor=True,
                                  coherent=True, span_hz=160e6)
+
+
+class RedoPrevious(Exception):
+    """The operator asked for the previous angle to be measured again."""
+
+
+class ManualPositioner:
+    """A positioner that is a person.
+
+    seek() pushes a prompt naming the angle and then waits for the operator to
+    say the AUT is there. It keeps pm.Positioner's contract - seek, position,
+    stop, an abort hook - so the scan loop drives a hand-turned tripod exactly
+    as it drives the tower, and gains the one thing a person needs that a
+    motor does not: "that one was wrong, do it again", which surfaces as
+    RedoPrevious.
+
+    The reported angle is the commanded one. Nothing measures where a tripod
+    actually points, and a field that echoed the operator's guess back as a
+    reading would be precision the data does not have.
+    """
+
+    manual = True
+
+    def __init__(self):
+        self._angle = 0.0
+        self._cv = threading.Condition()
+        self._pending: float | None = None
+        self._answer: str | None = None
+        self._push: Callable[[dict], None] = lambda payload: None
+
+    def attach(self, push, _log) -> None:
+        self._push = push
+
+    def identity(self) -> str:
+        return "manual - the AUT is turned by hand"
+
+    def position(self) -> float:
+        return self._angle
+
+    def speed(self) -> float:
+        return 0.0
+
+    def latched_error(self) -> str:
+        return "0"
+
+    def set_speed(self, _pct: float) -> None:
+        pass                     # a person sets their own pace
+
+    def zero_here(self) -> None:
+        self._angle = 0.0
+
+    @property
+    def pending(self) -> float | None:
+        """The angle the operator is being asked for, or None."""
+        return self._pending
+
+    def respond(self, action: str) -> None:
+        if action not in ("measure", "redo"):
+            raise BackendError(f"unknown operator action: {action!r}")
+        with self._cv:
+            if self._pending is None:
+                raise BackendError("nothing is waiting for the operator")
+            self._answer = action
+            self._cv.notify_all()
+
+    def stop(self) -> None:
+        with self._cv:
+            if self._pending is not None:
+                self._answer = "stop"
+                self._cv.notify_all()
+
+    def close(self) -> None:
+        self.stop()
+
+    def seek(self, deg: float, should_abort=None) -> float:
+        deg = float(deg)
+        with self._cv:
+            self._pending, self._answer = deg, None
+        self._push({"type": "manual_prompt", "deg": deg})
+        try:
+            with self._cv:
+                while self._answer is None:
+                    if should_abort is not None and should_abort():
+                        raise pm.Aborted(f"stopped while waiting for the "
+                                         f"operator at {deg:.1f} deg")
+                    self._cv.wait(0.1)
+                answer = self._answer
+        finally:
+            # Cleared on every exit, so a browser that reconnects mid-run is
+            # never shown a prompt for an angle nobody is waiting on.
+            with self._cv:
+                self._pending, self._answer = None, None
+            self._push({"type": "manual_cleared"})
+        if answer == "stop":
+            raise pm.Aborted(f"stopped while waiting for the operator at "
+                             f"{deg:.1f} deg")
+        if answer == "redo":
+            raise RedoPrevious()
+        self._angle = deg
+        return deg
+
+
+def _open_tower(rm, pos_resource: str | None, slot: int | None,
+                device: str | None) -> "pm.Positioner":
+    pcfg = pm.PositionerConfig()
+    if pos_resource:
+        pcfg.resource = pos_resource
+    cmds = pm.PositionerCmds()
+    if slot is not None:
+        cmds.slot = slot
+    if device:
+        cmds.device = device
+    return pm.Positioner(rm, pcfg, cmds)
+
+
+class PositionerRole:
+    """The positioner half of a backend, whichever receiver sits beside it.
+
+    `self.pos` is the EMControl tower, a ManualPositioner, or None, and every
+    method here answers for all three. Shared so the VNA and SDR backends
+    cannot drift apart on the thing with a cable through it.
+    """
+
+    pos: Any = None
+
+    @property
+    def has_positioner(self) -> bool:
+        return self.pos is not None
+
+    def _require_positioner(self):
+        if self.pos is None:
+            raise BackendError(
+                "no positioner attached - the service was started with "
+                "--no-positioner, so nothing can turn the tower")
+        return self.pos
+
+    def pos_idn(self) -> str | None:
+        return self.pos.identity() if self.pos else None
+
+    def position(self) -> float | None:
+        return self.pos.position() if self.pos else None
+
+    def speed(self) -> float | None:
+        return self.pos.speed() if self.pos else None
+
+    def latched_error(self) -> str | None:
+        return self.pos.latched_error() if self.pos else None
+
+    def set_speed(self, pct: float) -> None:
+        self._require_positioner().set_speed(pct)
+
+    def zero_here(self) -> None:
+        self._require_positioner().zero_here()
+
+    def stop(self) -> None:
+        # Not _require_positioner: stop is called on failure paths that do not
+        # know whether there is an axis, and raising there would replace the
+        # error being reported with one about the tower not existing.
+        if self.pos:
+            self.pos.stop()
+
+    def seek(self, deg: float, should_abort=None) -> float:
+        return self._require_positioner().seek(deg, should_abort=should_abort)
+
+    def attach(self, push, log) -> None:
+        hook = getattr(self.pos, "attach", None)
+        if hook:
+            hook(push, log)
+
+
+class SdrBackend(PositionerRole):
+    """A B205 measuring the power of one CW tone, beside any positioner.
+
+    The receiver is sdr_pattern's - the same gated capture and the same
+    Welch-and-Parseval tone estimate the CLI uses - so a reading here and a
+    reading there are one measurement. What this adds is a transmitter on the
+    same host, keyed only while something is being measured: configure() turns
+    it on and release() turns it off, and the service calls release() on every
+    way out of a scan or sweep. A tone left running after the run is over is
+    the SDR version of a tower left turning.
+
+    The level is dBFS, handed back as a linear amplitude so it lands in the
+    same pattern.csv columns a VNA's S21 does. Nothing references it to the
+    source, so the capabilities say ratio=False and the existing warning says
+    what that costs.
+    """
+
+    def __init__(self, rx_cfg: "sp.RadioConfig", radio, positioner=None,
+                 tx_radio=None, cap: "sp.CaptureConfig | None" = None,
+                 mode: str = "hw"):
+        self.rx_cfg = rx_cfg
+        self.radio = radio
+        self.tx = tx_radio
+        self.pos = positioner
+        self.cap = cap or sp.CaptureConfig()
+        self.mode = mode
+        self._rx_ready = False
+        self._tx_thread: threading.Thread | None = None
+        self._tx_stop = threading.Event()
+        self._tx_error: BaseException | None = None
+        self._log: Callable[[str, str, str], None] = lambda *_: None
+
+    @property
+    def tone_hz(self) -> float:
+        return self.rx_cfg.freq_hz + self.rx_cfg.offset_hz
+
+    def capabilities(self) -> Capabilities:
+        return Capabilities(parameters=("S21",), reflection=False,
+                            calibration=False, ratio=False, monitor=False,
+                            coherent=False, span_hz=None, fixed_hz=self.tone_hz)
+
+    def attach(self, push, log) -> None:
+        self._log = log
+        super().attach(push, log)
+
+    # -- identity / state ---------------------------------------------------
+    def vna_idn(self) -> str:
+        return f"{self.radio.describe()} - tone {self.tone_hz / 1e6:.4f} MHz"
+
+    def correction_state(self) -> str:
+        return "n/a (scalar receiver)"
+
+    def acm_module(self) -> str | None:
+        return None
+
+    def acm_characterization(self) -> dict | None:
+        return None
+
+    def calibrate(self, req, on_step=None, should_stop=None) -> str:
+        raise BackendError("an SDR tone receiver has no calibration to run")
+
+    def receiver_meta(self) -> dict:
+        tx = self.tx.cfg if self.tx is not None else None
+        return {"kind": "sdr_tone", "radio": self.radio.describe(),
+                "tone_hz": self.tone_hz,
+                "rx": self.rx_cfg.__dict__, "capture": self.cap.__dict__,
+                "tx": tx.__dict__ if tx is not None else None,
+                "units": "mag_db is dBFS; level is not referenced to the source"}
+
+    # -- measurement --------------------------------------------------------
+    def set_parameter(self, parameter: str) -> None:
+        if parameter != "S21":
+            raise BackendError(f"an SDR tone receiver measures one path; "
+                               f"{parameter} is not something it can take")
+
+    def configure(self, _req) -> None:
+        # The sweep fields are not consulted. The tone is where the transmitter
+        # puts it, and that is fixed when the service starts.
+        if not self._rx_ready:
+            self.radio.setup_rx()
+            self._rx_ready = True
+        if self.tx is None:
+            self._log("info", "rx", f"no transmitter on this host - the tone "
+                                    f"has to come from elsewhere, at "
+                                    f"{self.tone_hz / 1e6:.4f} MHz")
+        else:
+            self._tx_on()
+
+    def frequencies(self) -> np.ndarray:
+        return np.array([self.tone_hz])
+
+    def measure(self) -> np.ndarray:
+        if self._tx_error is not None:
+            err, self._tx_error = self._tx_error, None
+            raise BackendError(f"the transmitter stopped: "
+                               f"{type(err).__name__}: {err}")
+        # The simulated radio synthesizes its pattern from the angle it is
+        # told; a real one hears whatever the antenna is pointing at.
+        if self.pos is not None and hasattr(self.radio, "angle"):
+            self.radio.angle = self.pos.position()
+        r = sp.read_tone(self.radio, self.rx_cfg, self.cap)
+        where = (f"at {self.pos.position():.1f} deg: "
+                 if self.pos is not None else "")
+        for w in sp.warnings_for(r, self.cap, self.rx_cfg.offset_hz):
+            self._log("warn", "rx", where + w)
+        return np.array([10 ** (r.power_dbfs / 20) + 0j])
+
+    # -- transmitter --------------------------------------------------------
+    def _tx_on(self) -> None:
+        if self._tx_thread is not None and self._tx_thread.is_alive():
+            return
+        self._tx_stop.clear()
+        self._tx_error = None
+        self._tx_thread = threading.Thread(target=self._tx_run, daemon=True,
+                                           name="chamber-sdr-tx")
+        self._tx_thread.start()
+        time.sleep(0.5)          # let the tone settle before the first capture
+        self._log("info", "tx", f"transmitter ON at {self.tone_hz / 1e6:.4f} "
+                                f"MHz, gain {self.tx.cfg.tx_gain:.1f} dB")
+
+    def _tx_run(self) -> None:
+        try:
+            self.tx.transmit_forever(stop=self._tx_stop)
+        except BaseException as e:      # surfaced by the next measure()
+            self._tx_error = e
+
+    def _tx_off(self) -> None:
+        t = self._tx_thread
+        if t is None:
+            return
+        self._tx_stop.set()
+        t.join(timeout=5.0)
+        self._tx_thread = None
+        self._log("info", "tx", "transmitter OFF")
+
+    def release(self) -> None:
+        self._tx_off()
+
+    def stop(self) -> None:
+        try:
+            super().stop()
+        finally:
+            self._tx_off()
+
+    def close(self) -> None:
+        try:
+            self._tx_off()
+        finally:
+            if self.pos:
+                self.pos.close()
 
 
 class SimBackend:
@@ -539,7 +872,7 @@ class SimBackend:
         pass
 
 
-class HardwareBackend:
+class HardwareBackend(PositionerRole):
     """The real rig, driven through pattern_measure's instrument wrappers."""
 
     mode = "hw"
@@ -548,20 +881,13 @@ class HardwareBackend:
                  pos_resource: str | None = None,
                  slot: int | None = None, device: str | None = None,
                  with_positioner: bool = True,
-                 with_vna: bool = True):
+                 with_vna: bool = True,
+                 manual: bool = False):
         import pyvisa
         self._rm = pyvisa.ResourceManager()
         vcfg = pm.VnaConfig()
         if vna_resource:
             vcfg.resource = vna_resource
-        pcfg = pm.PositionerConfig()
-        if pos_resource:
-            pcfg.resource = pos_resource
-        cmds = pm.PositionerCmds()
-        if slot is not None:
-            cmds.slot = slot
-        if device:
-            cmds.device = device
 
         self._vcfg = vcfg
         # Receiver and positioner are both roles, and both optional. A bench
@@ -572,7 +898,15 @@ class HardwareBackend:
         # not to answer is how a pattern run turns into 72 sweeps of the same
         # angle, and the same reasoning applies to the receiver.
         self.vna = pm.Vna(self._rm, vcfg) if with_vna else None
-        self.pos = pm.Positioner(self._rm, pcfg, cmds) if with_positioner else None
+        # A person in place of the tower is asked for the same way: --manual
+        # never opens the EMCenter, so a rig with the tower unplugged cannot
+        # be mistaken for one with it.
+        if manual:
+            self.pos = ManualPositioner()
+        elif with_positioner:
+            self.pos = _open_tower(self._rm, pos_resource, slot, device)
+        else:
+            self.pos = None
 
     def capabilities(self) -> Capabilities:
         # Only the VNA receiver exists so far. A receiver that is absent can do
@@ -580,17 +914,6 @@ class HardwareBackend:
         return VNA_CAPS if self.vna else Capabilities(
             parameters=(), reflection=False, calibration=False,
             ratio=False, monitor=False)
-
-    @property
-    def has_positioner(self) -> bool:
-        return self.pos is not None
-
-    def _require_positioner(self):
-        if self.pos is None:
-            raise BackendError(
-                "no positioner attached - the service was started with "
-                "--no-positioner, so nothing can turn the tower")
-        return self.pos
 
     def _require_vna(self):
         if self.vna is None:
@@ -601,18 +924,6 @@ class HardwareBackend:
 
     def vna_idn(self) -> str | None:
         return self.vna.idn() if self.vna else None
-
-    def pos_idn(self) -> str | None:
-        return self.pos.identity() if self.pos else None
-
-    def position(self) -> float | None:
-        return self.pos.position() if self.pos else None
-
-    def speed(self) -> float | None:
-        return self.pos.speed() if self.pos else None
-
-    def latched_error(self) -> str | None:
-        return self.pos.latched_error() if self.pos else None
 
     def correction_state(self) -> str:
         # No receiver is not "uncalibrated"; it is "there is nothing to
@@ -642,22 +953,6 @@ class HardwareBackend:
             raise pm.Aborted("calibration stopped before it began")
         return self.vna.acm_calibrate(ports=tuple(req.ports),
                                       orient=req.orient, on_step=on_step)
-
-    def set_speed(self, pct: float) -> None:
-        self._require_positioner().set_speed(pct)
-
-    def zero_here(self) -> None:
-        self._require_positioner().zero_here()
-
-    def stop(self) -> None:
-        # Not _require_positioner: stop is called on failure paths that do not
-        # know whether there is an axis, and raising there would replace the
-        # error being reported with one about the tower not existing.
-        if self.pos:
-            self.pos.stop()
-
-    def seek(self, deg: float, should_abort=None) -> float:
-        return self._require_positioner().seek(deg, should_abort=should_abort)
 
     def set_parameter(self, parameter: str) -> None:
         self._require_vna().set_parameter(parameter)
@@ -714,6 +1009,15 @@ class ChamberService:
         self._lock = threading.Lock()
         self.last_run: dict | None = None
         self.calibration: dict | None = _load_calibration()
+        # A backend whose parts talk to the operator - a hand-turned
+        # positioner's prompts, a transmitter saying it is keyed - gets the
+        # same push and log the service uses.
+        # Late-bound, so anything that replaces push afterwards (the rigcheck
+        # harness captures frames that way) is what they reach.
+        hook = getattr(backend, "attach", None)
+        if hook:
+            hook(lambda payload: self.push(payload),
+                 lambda level, source, message: self.log(level, source, message))
 
     # -- push ---------------------------------------------------------------
     def push(self, payload: dict) -> None:
@@ -758,12 +1062,36 @@ class ChamberService:
         get = getattr(self.backend, "capabilities", None)
         return get() if get else VNA_CAPS
 
+    def _manual(self) -> "ManualPositioner | None":
+        pos = getattr(self.backend, "pos", None)
+        return pos if getattr(pos, "manual", False) else None
+
+    def _release(self) -> None:
+        """Let the backend drop anything it holds only while measuring.
+
+        For the SDR backend that is the transmitter. Called on every way out
+        of a scan or a sweep, success included, so RF is never left on after
+        the run that needed it.
+        """
+        rel = getattr(self.backend, "release", None)
+        if rel is None:
+            return
+        try:
+            rel()
+        except Exception as e:
+            self.log("error", "rx", f"release failed: {type(e).__name__}: {e}")
+
     def get_state(self) -> dict:
         has_pos = getattr(self.backend, "has_positioner", True)
         caps = self.capabilities()
+        manual = self._manual()
         st = {"mode": self.backend.mode, "scanning": self.scanning,
               "calibrating": self.calibrating, "sweeping": self.sweeping,
               "calibration": self.calibration, "has_positioner": has_pos,
+              "manual": manual is not None,
+              # A browser that connects while the operator is being asked for
+              # an angle has to be able to show the question.
+              "manual_pending": manual.pending if manual else None,
               "capabilities": caps.as_dict()}
         try:
             st.update({
@@ -824,8 +1152,14 @@ class ChamberService:
             # things end up programming the same VNA at once.
             raise BackendError("a sweep is running; cancel it first")
 
+    def _refuse_manual(self, what: str) -> None:
+        if self._manual():
+            raise BackendError(f"the AUT is turned by hand - there is no axis "
+                               f"to {what}")
+
     def cmd_jog(self, a: dict) -> dict:
         self._require_idle()
+        self._refuse_manual("jog")
         with self._lock:
             if "delta" in a:
                 # A delta can walk off the end of the travel - +10 from 175 -
@@ -846,6 +1180,7 @@ class ChamberService:
 
     def cmd_zero_here(self, _a: dict) -> dict:
         self._require_idle()
+        self._refuse_manual("zero")
         with self._lock:
             self.backend.zero_here()
             ang = self.backend.position()
@@ -859,6 +1194,21 @@ class ChamberService:
             self.backend.set_speed(float(a["percent"]))
             sp = self.backend.speed()
         return {"speed": round(sp, 1)}
+
+    def cmd_manual_step(self, a: dict) -> dict:
+        """The operator's answer to a prompt: the AUT is at the angle, or the
+        previous point needs measuring again.
+
+        Deliberately does not take the lock. The scan worker holds it for the
+        whole of seek-then-measure, and seek is where it is waiting for this.
+        """
+        manual = self._manual()
+        if manual is None:
+            raise BackendError("this rig has a positioner; there is nobody to "
+                               "answer for it")
+        action = str(a.get("action", "measure"))
+        manual.respond(action)
+        return {"action": action}
 
     def cmd_list_runs(self, _a: dict) -> dict:
         RUNS_DIR.mkdir(exist_ok=True)
@@ -1013,6 +1363,8 @@ class ChamberService:
             self.log("error", "sweep", f"{type(e).__name__}: {e}")
             self.push({"type": "sweep_done", "cancelled": True,
                        "error": str(e)})
+        finally:
+            self._release()
 
     def _run_cal(self, req: CalRequest) -> None:
         started = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -1144,30 +1496,55 @@ class ChamberService:
             self.log("info", "scan", f"{name}: {angles.size} angles, "
                                      f"{freqs.size} freqs")
 
+            header = ["angle_cmd_deg", "angle_actual_deg", "freq_hz",
+                      "re", "im", "mag_db", "phase_deg"]
             csv_path = outdir / "pattern.csv"
+            # Kept per index so a redo replaces its angle's rows rather than
+            # appending a second set: one angle, one trace, in every file.
+            written: dict[int, list[list[str]]] = {}
             with csv_path.open("w", newline="") as fh:
                 w = csv.writer(fh)
-                w.writerow(["angle_cmd_deg", "angle_actual_deg", "freq_hz",
-                            "re", "im", "mag_db", "phase_deg"])
+                w.writerow(header)
 
-                for i, ang in enumerate(angles):
+                i = 0
+                while i < angles.size:
+                    ang = float(angles[i])
                     if self._cancel.is_set():
                         self.log("warn", "scan", f"cancelled at index {i}")
                         self.push({"type": "scan_done", "name": name,
                                    "cancelled": True, "n_done": i})
                         return
 
-                    with self._lock:
-                        actual = self.backend.seek(
-                            float(ang), should_abort=self._cancel.is_set)
-                        s = self.backend.measure()
+                    try:
+                        with self._lock:
+                            actual = self.backend.seek(
+                                ang, should_abort=self._cancel.is_set)
+                            s = self.backend.measure()
+                    except RedoPrevious:
+                        # Only a hand-turned positioner raises this. Step back
+                        # one; the next pass prompts for that angle again.
+                        if i > 0:
+                            i -= 1
+                            self.log("info", "scan", f"re-measuring "
+                                                     f"{float(angles[i]):.1f} deg")
+                        continue
 
                     mag = 20.0 * np.log10(np.maximum(np.abs(s), 1e-15))
                     phase = np.degrees(np.angle(s))
-                    for f, sv, m, ph in zip(freqs, s, mag, phase):
-                        w.writerow([f"{ang:.2f}", f"{actual:.2f}", f"{f:.0f}",
-                                    f"{sv.real:.9e}", f"{sv.imag:.9e}",
-                                    f"{m:.4f}", f"{ph:.4f}"])
+                    rows = [[f"{ang:.2f}", f"{actual:.2f}", f"{f:.0f}",
+                             f"{sv.real:.9e}", f"{sv.imag:.9e}",
+                             f"{m:.4f}", f"{ph:.4f}"]
+                            for f, sv, m, ph in zip(freqs, s, mag, phase)]
+                    redone = i in written
+                    written[i] = rows
+                    if redone:
+                        fh.seek(0)
+                        fh.truncate()
+                        w.writerow(header)
+                        for k in sorted(written):
+                            w.writerows(written[k])
+                    else:
+                        w.writerows(rows)
                     fh.flush()
 
                     self.push({"type": "scan_point", "index": i,
@@ -1176,7 +1553,9 @@ class ChamberService:
                                "mag_db": [round(float(v), 4) for v in mag],
                                "peak_db": round(float(mag.max()), 3)})
                     self.push({"type": "position", "deg": round(float(actual), 2)})
+                    i += 1
 
+            receiver = getattr(self.backend, "receiver_meta", None)
             meta = {"name": name, "params": req.__dict__,
                     "n_angles": int(angles.size), "n_freqs": int(freqs.size),
                     "finished": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1189,7 +1568,14 @@ class ChamberService:
                     # cal.json, and a finished run has to keep saying what it
                     # was taken against.
                     "calibration": self.calibration,
-                    "cal_mismatch": drift}
+                    "cal_mismatch": drift,
+                    # What took the reading when it was not the VNA, and how
+                    # the AUT was turned. Neither is recoverable from the CSV.
+                    "receiver": receiver() if receiver else None,
+                    "positioner": ("manual" if self._manual()
+                                   else "tower" if getattr(self.backend,
+                                                           "has_positioner", True)
+                                   else None)}
             (outdir / "meta.json").write_text(json.dumps(meta, indent=2))
             self.last_run = meta
             self.push({"type": "scan_done", "name": name, "cancelled": False,
@@ -1213,6 +1599,8 @@ class ChamberService:
             self.log("error", "scan", f"{type(e).__name__}: {e}")
             self.push({"type": "scan_done", "name": name, "cancelled": True,
                        "error": str(e)})
+        finally:
+            self._release()
 
     # -- dispatch -----------------------------------------------------------
     HANDLERS = {
@@ -1230,6 +1618,7 @@ class ChamberService:
         "cancel_cal": "cmd_cancel_cal",
         "sweep": "cmd_sweep",
         "cancel_sweep": "cmd_cancel_sweep",
+        "manual_step": "cmd_manual_step",
     }
 
     async def handle(self, msg: str) -> str | None:
@@ -1343,10 +1732,14 @@ def build_backend(a) -> Any:
     if a.sim:
         print("backend: SIMULATED (forced with --sim)")
         return SimBackend()
+    manual = getattr(a, "manual", False)
+    if getattr(a, "sdr", None):
+        return build_sdr_backend(a)
     try:
         b = HardwareBackend(a.vna, a.pos, a.slot, a.device,
                             with_positioner=not a.no_positioner,
-                            with_vna=not getattr(a, "no_vna", False))
+                            with_vna=not getattr(a, "no_vna", False),
+                            manual=manual)
         pos = b.pos_idn() if b.has_positioner else "none (--no-positioner)"
         vna = b.vna_idn() or "none (--no-vna)"
         print(f"backend: hardware\n  VNA {vna}\n  POS {pos}")
@@ -1366,6 +1759,48 @@ def build_backend(a) -> Any:
         print(f"backend: hardware unavailable ({type(e).__name__}: {e})")
         print("backend: falling back to SIMULATED - pass --no-fallback to refuse")
         return SimBackend()
+
+
+def build_sdr_backend(a) -> "SdrBackend":
+    """The SDR receiver, an optional transmitter on the same host, and
+    whichever positioner was asked for.
+
+    No fallback to the simulator. A radio that will not open is a cable or a
+    USB port, and a dashboard that quietly drew a synthetic dipole instead is
+    worse than one that refused to start. `--sdr sim` is how to ask for the
+    simulator on purpose; it uses sdr_pattern's SimRadio, so everything from
+    the tone estimate up is the code that runs on the real radio.
+    """
+    sim = a.sdr == "sim"
+    rx = sp.RadioConfig(args="" if sim else a.sdr,
+                        freq_hz=a.sdr_freq_mhz * 1e6,
+                        offset_hz=a.sdr_offset_khz * 1e3,
+                        rx_gain=a.sdr_rx_gain, tx_gain=a.sdr_tx_gain)
+    make = sp.SimRadio if sim else sp.UhdRadio
+    radio = make(rx)
+    tx = None
+    if a.sdr_tx:
+        if (a.sdr_tx == "sim") != sim:
+            raise SystemExit("--sdr and --sdr-tx must both be 'sim' or both "
+                             "be real radios")
+        tx = make(replace(rx, args="" if sim else a.sdr_tx))
+
+    if getattr(a, "manual", False):
+        pos = ManualPositioner()
+    elif a.no_positioner:
+        pos = None
+    else:
+        import pyvisa
+        pos = _open_tower(pyvisa.ResourceManager(), a.pos, a.slot, a.device)
+
+    b = SdrBackend(rx, radio, positioner=pos, tx_radio=tx,
+                   mode="sim" if sim else "hw")
+    print(f"backend: SDR tone receiver{' (SIMULATED)' if sim else ''}\n"
+          f"  RX  {radio.describe()}, tone {b.tone_hz / 1e6:.4f} MHz, "
+          f"gain {rx.rx_gain:.1f} dB\n"
+          f"  TX  {tx.describe() if tx else 'none on this host'}\n"
+          f"  POS {b.pos_idn() or 'none (--no-positioner)'}")
+    return b
 
 
 def main(argv=None) -> int:
@@ -1391,6 +1826,23 @@ def main(argv=None) -> int:
                         "work, scans and jogs are refused. Asked for "
                         "explicitly, never inferred from a tower that failed "
                         "to answer.")
+    p.add_argument("--manual", action="store_true",
+                   help="the AUT is turned by hand: each scan step prompts the "
+                        "operator for the angle and waits for Measure. The "
+                        "EMCenter is never opened.")
+    sdr = sp.RadioConfig()
+    p.add_argument("--sdr", default=None, metavar="ARGS",
+                   help="use a B205 as the receiver instead of the VNA. ARGS "
+                        "are UHD device args, e.g. 'serial=3234ABC', or 'sim'")
+    p.add_argument("--sdr-tx", default=None, metavar="ARGS",
+                   help="a second B205 on this host transmitting the tone, "
+                        "keyed only while a scan runs. Omit when the tone "
+                        "comes from another machine (sdr_pattern.py tx)")
+    p.add_argument("--sdr-freq-mhz", type=float, default=sdr.freq_hz / 1e6,
+                   help="LO frequency; the tone sits --sdr-offset-khz above it")
+    p.add_argument("--sdr-offset-khz", type=float, default=sdr.offset_hz / 1e3)
+    p.add_argument("--sdr-rx-gain", type=float, default=sdr.rx_gain)
+    p.add_argument("--sdr-tx-gain", type=float, default=sdr.tx_gain)
     p.add_argument("--vna", default=None)
     p.add_argument("--pos", default=None)
     p.add_argument("--slot", type=int, default=None)

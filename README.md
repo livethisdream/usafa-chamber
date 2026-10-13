@@ -343,11 +343,63 @@ The FTDI link corrupts bytes at a measurable rate — roughly 7% of exchanges in
 Retries warn on stderr. A run logging many of them means the link is degrading —
 suspect cable, hub, or RF pickup rather than the software.
 
+## SDR fallback (no VNA, no chamber)
+
+`sdr_pattern.py` measures a magnitude-only cut with two B205minis: one transmits
+a CW tone into a reference antenna, the other receives from the AUT on a tripod,
+turned by hand at each prompt (or by the positioner with `--pos`). Output lands
+in the same `pattern.csv` layout, with `mag_db` in dBFS and no phase.
+
+```
+sdr_pattern.py tx --freq-mhz 915                     # TX laptop, Ctrl-C = RF off
+sdr_pattern.py monitor --freq-mhz 915                # aim; AUT on a 50 ohm load = floor
+sdr_pattern.py rx --freq-mhz 915 --step 5 --outdir runs/aut1
+sdr_pattern.py rx --sim --no-prompt --step 10        # whole flow, no hardware
+```
+
+- Fit a DC block and a 10-20 dB pad on the RX port. The B205mini input damages
+  around -15 dBm.
+- Keep the deepest null at least 10 dB above the floor that `monitor` reports
+  with the AUT replaced by a load. Every reading flags low SNR and ADC clipping.
+- The run ends by re-measuring the start angle. More than 0.5 dB of drift means
+  the run should be repeated or broken into shorter segments.
+- UHD's Python bindings come with the UHD install, not pip, so run it with the
+  interpreter UHD installed into.
+
+### In the dashboard
+
+The same receiver, and a person in place of the tower, are both service flags:
+
+```
+chamber_service.py --sdr serial=RX --sdr-tx serial=TX --manual      # both B205s on this PC
+chamber_service.py --sdr serial=RX --manual                         # tone from another machine
+chamber_service.py --sdr sim --sdr-tx sim --manual                  # simulated, for practice
+chamber_service.py --manual                                         # the VNA, turned by hand
+```
+
+- `--manual` replaces the tower with a prompt. Each scan step shows **Turn the
+  AUT to N°** above the plots and waits for **Measure** (or Space, Enter,
+  PageDown). **Redo previous** (R, PageUp) steps back one angle and replaces its
+  rows rather than adding a second set. Jog, Go and define-zero are locked; STOP
+  ends the wait. The EMCenter is never opened.
+- `--sdr` measures one CW tone at `--sdr-freq-mhz` + `--sdr-offset-khz`
+  (default 915.1 MHz). The sweep fields lock to that frequency, and calibration
+  and the Sweep tab go away, as they do for `--sim-sdr`.
+- `--sdr-tx` keys the transmitter only while a scan runs: on at the start, off
+  on every way out, STOP included. Without it the tone has to come from
+  `sdr_pattern.py tx` on another machine, at the same frequency and offset.
+- With two B205s on one PC, give each its serial (`uhd_find_devices` lists
+  them); `type=b200` alone picks whichever UHD finds first.
+- `meta.json` records the receiver (radio, tone, gains) and that the positioner
+  was manual. There is no end-of-run drift recheck here, unlike the CLI; scan
+  the first angle again as a last point if drift matters.
+
 ## Layout
 
 | Path | What |
 |---|---|
 | `pattern_measure.py` | Instrument wrappers and standalone step-and-measure acquisition |
+| `sdr_pattern.py` | Scalar pattern with two B205minis, outside the chamber (no VNA) |
 | `chamber_service.py` | WebSocket service (port 8766), hardware + simulated backends |
 | `frontend/` | Vite + Plotly dashboard |
 | `uicheck.py` | Browser check: drives the built dashboard against `--sim` |

@@ -816,3 +816,43 @@ h1, h2, h3 { font-family: 'Outfit', 'Inter', sans-serif; }
 @media (max-width: 900px) {
   .sweep-charts { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
 }
+
+/* Hand-turned rig: the prompt for the next angle. Sized to be read from the
+   back of a room, because on a class demo that is where it is read from. */
+.manual-prompt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 0.5rem;
+  padding: 0.6rem 0.9rem;
+  border: 1px solid rgba(0, 136, 209, 0.45);
+  background: rgba(0, 136, 209, 0.12);
+  border-radius: 12px;
+}
+.manual-prompt[hidden] { display: none; }
+.manual-prompt-text {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.75rem;
+  min-width: 0;
+}
+.manual-prompt-label,
+.manual-prompt-sub {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+.manual-prompt-angle {
+  font-family: 'Outfit', 'Inter', system-ui, sans-serif;
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--text-main);
+  font-variant-numeric: tabular-nums;
+}
+.manual-prompt-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
