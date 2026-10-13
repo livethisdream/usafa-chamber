@@ -372,6 +372,7 @@ The same receiver, and a person in place of the tower, are both service flags:
 
 ```
 chamber_service.py --sdr serial=RX --sdr-tx serial=TX --manual      # both B205s on this PC
+chamber_service.py --sdr addr=192.168.10.2 --sdr-tx addr=192.168.10.2 --manual   # one N200, TX/RX -> RX2
 chamber_service.py --sdr serial=RX --manual                         # tone from another machine
 chamber_service.py --sdr sim --sdr-tx sim --manual                  # simulated, for practice
 chamber_service.py --manual                                         # the VNA, turned by hand
@@ -390,6 +391,11 @@ chamber_service.py --manual                                         # the VNA, t
   `sdr_pattern.py tx` on another machine, at the same frequency and offset.
 - With two B205s on one PC, give each its serial (`uhd_find_devices` lists
   them); `type=b200` alone picks whichever UHD finds first.
+- One radio with both ports (an N200) is given the same args for `--sdr` and
+  `--sdr-tx` and opened once. On Windows a network radio (`addr=`) gets
+  `send_frame_size=1000` added unless the args set it: larger UDP frames reach
+  it out of sequence ("SSSS") and nothing is transmitted. With the antennas
+  inches apart, start both gains at 0.
 - `meta.json` records the receiver (radio, tone, gains) and that the positioner
   was manual. There is no end-of-run drift recheck here, unlike the CLI; scan
   the first angle again as a last point if drift matters.

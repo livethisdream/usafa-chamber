@@ -84,12 +84,27 @@ class CaptureConfig:
 # Radios
 # --------------------------------------------------------------------------
 
+# Windows sends UDP datagrams over 1024 bytes by a slower path (AFD's
+# FastSendDatagramThreshold) that reorders them. UHD's default 1472-byte
+# frames then reach a network USRP out of sequence: "SSSS", and no tone.
+WINDOWS_SEND_FRAME = 1000
+
+
+def device_args(args: str, platform: str = sys.platform) -> str:
+    """Add send_frame_size for a network USRP on Windows, unless given.
+    USB radios are left alone: there it sets the USB transfer size."""
+    keys = {kv.split("=", 1)[0].strip() for kv in args.split(",") if kv.strip()}
+    if platform == "win32" and "addr" in keys and "send_frame_size" not in keys:
+        return f"{args},send_frame_size={WINDOWS_SEND_FRAME}"
+    return args
+
+
 class UhdRadio:
     def __init__(self, cfg: RadioConfig):
         import uhd  # deferred so --sim and --help work without UHD
         self.uhd = uhd
         self.cfg = cfg
-        self.usrp = uhd.usrp.MultiUSRP(cfg.args)
+        self.usrp = uhd.usrp.MultiUSRP(device_args(cfg.args))
 
     def describe(self) -> str:
         try:
